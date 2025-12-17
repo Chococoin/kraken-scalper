@@ -23,6 +23,12 @@ pub struct KrakenConfig {
     pub api_secret: String,
     pub ws_url: String,
     pub ws_auth_url: String,
+    #[serde(default = "default_rest_url")]
+    pub rest_url: String,
+}
+
+fn default_rest_url() -> String {
+    "https://api.kraken.com".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

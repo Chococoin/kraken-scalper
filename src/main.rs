@@ -1,13 +1,28 @@
 use anyhow::Result;
 use scalper::{config::Config, ui::App};
+use std::fs::OpenOptions;
+use std::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging (to file, not terminal since we use TUI)
+    // Initialize logging to file (not terminal since we use TUI)
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("scalper.log")
+        .expect("Failed to open log file");
+
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(Mutex::new(log_file))
+                .with_ansi(false),
+        )
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     tracing::info!("Starting Kraken Scalper Bot");

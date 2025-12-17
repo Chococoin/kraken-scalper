@@ -57,6 +57,18 @@ impl Database {
             .await
             .context("Failed to connect to SQLite database")?;
 
+        // Enable WAL mode for better concurrent access from multiple processes
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&pool)
+            .await
+            .context("Failed to enable WAL mode")?;
+
+        // Set busy timeout to 5 seconds to handle lock contention
+        sqlx::query("PRAGMA busy_timeout=5000")
+            .execute(&pool)
+            .await
+            .context("Failed to set busy timeout")?;
+
         let db = Self { pool };
         db.run_migrations().await?;
 
