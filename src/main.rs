@@ -14,7 +14,11 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = Config::load()?;
-    tracing::info!("Loaded config for pairs: {:?}", config.trading.pairs);
+    tracing::info!(
+        "Loaded config for {} crypto pairs, {} stock pairs",
+        config.trading.crypto_pairs.len(),
+        config.trading.stock_pairs.len()
+    );
 
     // Run the application
     let mut app = App::new(config).await?;

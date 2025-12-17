@@ -4,15 +4,27 @@ use crate::data::{Candle, CandleStore, OrderBookStore, Ticker, TickerStore};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
+/// Trade event data
+#[derive(Debug, Clone)]
+pub struct TradeEvent {
+    pub pair: String,
+    pub side: String,
+    pub price: Decimal,
+    pub qty: Decimal,
+    pub trade_id: u64,
+}
+
 pub enum MarketEvent {
     TickerUpdate(Ticker),
     OrderBookUpdate(String),
     CandleUpdate(String),
+    TradeUpdate(TradeEvent),
     Connected,
     Disconnected,
     Error(String),
@@ -20,21 +32,41 @@ pub enum MarketEvent {
 
 pub struct KrakenWebSocket {
     config: KrakenConfig,
-    pairs: Vec<String>,
+    crypto_pairs: Vec<String>,
+    stock_pairs: Vec<String>,
+    crypto_book_depth: u32,
+    stock_book_depth: u32,
     pub tickers: Arc<Mutex<TickerStore>>,
     pub orderbooks: Arc<Mutex<OrderBookStore>>,
     pub candles: Arc<Mutex<CandleStore>>,
 }
 
 impl KrakenWebSocket {
-    pub fn new(config: KrakenConfig, pairs: Vec<String>, max_candles: usize) -> Self {
+    pub fn new(
+        config: KrakenConfig,
+        crypto_pairs: Vec<String>,
+        stock_pairs: Vec<String>,
+        crypto_book_depth: u32,
+        stock_book_depth: u32,
+        max_candles: usize,
+    ) -> Self {
         Self {
             config,
-            pairs,
+            crypto_pairs,
+            stock_pairs,
+            crypto_book_depth,
+            stock_book_depth,
             tickers: Arc::new(Mutex::new(TickerStore::new())),
             orderbooks: Arc::new(Mutex::new(OrderBookStore::new())),
             candles: Arc::new(Mutex::new(CandleStore::new(max_candles))),
         }
+    }
+
+    /// Get all pairs (crypto + stocks)
+    pub fn all_pairs(&self) -> Vec<String> {
+        let mut pairs = self.crypto_pairs.clone();
+        pairs.extend(self.stock_pairs.clone());
+        pairs
     }
 
     pub async fn connect(&self, event_tx: mpsc::Sender<MarketEvent>) -> Result<()> {
@@ -99,12 +131,14 @@ impl KrakenWebSocket {
         S: SinkExt<Message> + Unpin,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        // Subscribe to ticker
+        let all_pairs = self.all_pairs();
+
+        // Subscribe to ticker for all pairs
         let ticker_sub = serde_json::json!({
             "method": "subscribe",
             "params": {
                 "channel": "ticker",
-                "symbol": self.pairs
+                "symbol": all_pairs
             }
         });
         write
@@ -112,26 +146,44 @@ impl KrakenWebSocket {
             .await
             .context("Failed to send ticker subscription")?;
 
-        // Subscribe to order book (depth 10)
-        let book_sub = serde_json::json!({
-            "method": "subscribe",
-            "params": {
-                "channel": "book",
-                "symbol": self.pairs,
-                "depth": 10
-            }
-        });
-        write
-            .send(Message::Text(book_sub.to_string().into()))
-            .await
-            .context("Failed to send book subscription")?;
+        // Subscribe to order book for crypto pairs (deeper book)
+        if !self.crypto_pairs.is_empty() {
+            let crypto_book_sub = serde_json::json!({
+                "method": "subscribe",
+                "params": {
+                    "channel": "book",
+                    "symbol": self.crypto_pairs,
+                    "depth": self.crypto_book_depth
+                }
+            });
+            write
+                .send(Message::Text(crypto_book_sub.to_string().into()))
+                .await
+                .context("Failed to send crypto book subscription")?;
+        }
 
-        // Subscribe to OHLC (1 minute candles)
+        // Subscribe to order book for stock pairs (shallower book)
+        if !self.stock_pairs.is_empty() {
+            let stock_book_sub = serde_json::json!({
+                "method": "subscribe",
+                "params": {
+                    "channel": "book",
+                    "symbol": self.stock_pairs,
+                    "depth": self.stock_book_depth
+                }
+            });
+            write
+                .send(Message::Text(stock_book_sub.to_string().into()))
+                .await
+                .context("Failed to send stock book subscription")?;
+        }
+
+        // Subscribe to OHLC (1 minute candles) for all pairs
         let ohlc_sub = serde_json::json!({
             "method": "subscribe",
             "params": {
                 "channel": "ohlc",
-                "symbol": self.pairs,
+                "symbol": all_pairs,
                 "interval": 1
             }
         });
@@ -140,7 +192,24 @@ impl KrakenWebSocket {
             .await
             .context("Failed to send ohlc subscription")?;
 
-        info!("Subscribed to ticker, book, and ohlc for {:?}", self.pairs);
+        // Subscribe to trade channel for all pairs
+        let trade_sub = serde_json::json!({
+            "method": "subscribe",
+            "params": {
+                "channel": "trade",
+                "symbol": all_pairs
+            }
+        });
+        write
+            .send(Message::Text(trade_sub.to_string().into()))
+            .await
+            .context("Failed to send trade subscription")?;
+
+        info!(
+            "Subscribed to ticker, book, ohlc, trade for crypto: {:?} (depth {}), stocks: {:?} (depth {})",
+            self.crypto_pairs, self.crypto_book_depth,
+            self.stock_pairs, self.stock_book_depth
+        );
         Ok(())
     }
 
@@ -241,6 +310,26 @@ impl KrakenWebSocket {
                             let _ = event_tx
                                 .send(MarketEvent::CandleUpdate(ohlc_data.symbol))
                                 .await;
+                        }
+                    }
+                }
+            }
+            (Some("trade"), Some("update") | Some("snapshot")) => {
+                if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                    for item in data {
+                        if let Ok(trade_data) = serde_json::from_value::<TradeData>(item.clone()) {
+                            let trade_event = TradeEvent {
+                                pair: trade_data.symbol.clone(),
+                                side: trade_data.side.clone(),
+                                price: trade_data.price,
+                                qty: trade_data.qty,
+                                trade_id: trade_data.trade_id,
+                            };
+                            debug!(
+                                "Trade: {} {} {} @ {}",
+                                trade_data.symbol, trade_data.side, trade_data.qty, trade_data.price
+                            );
+                            let _ = event_tx.send(MarketEvent::TradeUpdate(trade_event)).await;
                         }
                     }
                 }

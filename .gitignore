@@ -4,6 +4,9 @@
 # Database
 *.db
 
+# Recorded market data
+/data/
+
 # IDE
 .idea/
 .vscode/

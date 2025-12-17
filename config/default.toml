@@ -10,8 +10,23 @@ ws_url = "wss://ws.kraken.com/v2"
 ws_auth_url = "wss://ws-auth.kraken.com/v2"
 
 [trading]
-# Trading pairs to monitor (Kraken format)
-pairs = ["BTC/USD", "ETH/USD"]
+# Crypto pairs to monitor
+crypto_pairs = [
+    "BTC/USD", "BTC/EUR",
+    "ETH/USD", "ETH/EUR",
+    "SOL/USD", "SOL/EUR",
+    "DOT/USD", "DOT/EUR",
+    "MATIC/USD", "MATIC/EUR"
+]
+
+# Stock pairs to monitor (tokenized stocks)
+stock_pairs = [
+    "GOOGL/USD", "GOOGL/EUR",
+    "AAPL/USD", "AAPL/EUR",
+    "TSLA/USD", "TSLA/EUR",
+    "MSFT/USD", "MSFT/EUR",
+    "NVDA/USD", "NVDA/EUR"
+]
 
 # Trading mode: "paper" or "live"
 mode = "paper"
@@ -26,6 +41,24 @@ take_profit_pct = 0.15     # Take profit target (%)
 stop_loss_pct = 0.1        # Stop loss (%)
 max_position_size = 0.1    # Max position as % of balance
 cooldown_seconds = 30      # Seconds between trades
+
+[recording]
+# Enable/disable data recording
+enabled = true
+
+# Directory to store parquet files
+data_dir = "data"
+
+# Sampling intervals
+crypto_sample_interval_secs = 30    # Sample crypto data every 30 seconds
+stock_sample_interval_secs = 1800   # Sample stock data every 30 minutes
+
+# Order book depth
+crypto_book_depth = 100    # 100 levels for crypto
+stock_book_depth = 10      # 10 levels for stocks
+
+# Flush interval (write to disk)
+flush_interval_secs = 3600  # Write parquet files every hour
 
 [ui]
 # Refresh rate in milliseconds

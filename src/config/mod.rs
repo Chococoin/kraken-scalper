@@ -8,6 +8,7 @@ pub struct Config {
     pub kraken: KrakenConfig,
     pub trading: TradingConfig,
     pub strategy: StrategyConfig,
+    pub recording: RecordingConfig,
     pub ui: UiConfig,
     pub database: DatabaseConfig,
 }
@@ -22,7 +23,8 @@ pub struct KrakenConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TradingConfig {
-    pub pairs: Vec<String>,
+    pub crypto_pairs: Vec<String>,
+    pub stock_pairs: Vec<String>,
     pub mode: TradingMode,
     pub paper_balance: f64,
 }
@@ -41,6 +43,17 @@ pub struct StrategyConfig {
     pub stop_loss_pct: f64,
     pub max_position_size: f64,
     pub cooldown_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecordingConfig {
+    pub enabled: bool,
+    pub data_dir: String,
+    pub crypto_sample_interval_secs: u64,
+    pub stock_sample_interval_secs: u64,
+    pub crypto_book_depth: u32,
+    pub stock_book_depth: u32,
+    pub flush_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,5 +105,22 @@ impl Config {
 
     pub fn is_paper_trading(&self) -> bool {
         self.trading.mode == TradingMode::Paper
+    }
+
+    /// Get all pairs (crypto + stocks)
+    pub fn all_pairs(&self) -> Vec<String> {
+        let mut pairs = self.trading.crypto_pairs.clone();
+        pairs.extend(self.trading.stock_pairs.clone());
+        pairs
+    }
+
+    /// Check if a pair is a crypto pair
+    pub fn is_crypto_pair(&self, pair: &str) -> bool {
+        self.trading.crypto_pairs.contains(&pair.to_string())
+    }
+
+    /// Check if a pair is a stock pair
+    pub fn is_stock_pair(&self, pair: &str) -> bool {
+        self.trading.stock_pairs.contains(&pair.to_string())
     }
 }

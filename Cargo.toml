@@ -53,6 +53,10 @@ anyhow = "1"
 # URL handling
 url = "2"
 
+# Data recording (Parquet)
+parquet = "54"
+arrow = "54"
+
 [profile.release]
 opt-level = 3
 lto = true

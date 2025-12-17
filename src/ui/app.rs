@@ -1,7 +1,7 @@
-use crate::api::{websocket::MarketEvent, KrakenWebSocket};
+use crate::api::{KrakenWebSocket, MarketEvent};
 use crate::config::Config;
 use crate::data::{Candle, OrderBook, Ticker};
-use crate::storage::{Database, TradeRecord};
+use crate::storage::{DataRecorder, Database, TradeRecord};
 use crate::trading::order::Position;
 use crate::trading::TradingEngine;
 use crate::ui::charts::PriceChart;
@@ -26,6 +26,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tracing::error;
 
 /// Local UI state - no locks needed for rendering
 struct UiState {
@@ -59,6 +60,7 @@ impl UiState {
 pub struct App {
     config: Config,
     engine: Arc<Mutex<TradingEngine>>,
+    recorder: DataRecorder,
     recent_trades: Vec<TradeRecord>,
     connected: bool,
     selected_pair: usize,
@@ -75,9 +77,13 @@ impl App {
 
         let ui_state = UiState::new(engine.balance(), engine.is_paper_trading());
 
+        // Create data recorder
+        let recorder = DataRecorder::new(&config);
+
         Ok(Self {
             config,
             engine: Arc::new(Mutex::new(engine)),
+            recorder,
             recent_trades,
             connected: false,
             selected_pair: 0,
@@ -97,16 +103,20 @@ impl App {
         // Create event channel
         let (event_tx, mut event_rx) = mpsc::channel::<MarketEvent>(100);
 
-        // Start WebSocket connection
+        // Start WebSocket connection with separate crypto/stock pairs and depths
         let ws = KrakenWebSocket::new(
             self.config.kraken.clone(),
-            self.config.trading.pairs.clone(),
+            self.config.trading.crypto_pairs.clone(),
+            self.config.trading.stock_pairs.clone(),
+            self.config.recording.crypto_book_depth,
+            self.config.recording.stock_book_depth,
             self.config.ui.chart_candles,
         );
 
         let ws_tickers = Arc::clone(&ws.tickers);
         let ws_orderbooks = Arc::clone(&ws.orderbooks);
         let ws_candles = Arc::clone(&ws.candles);
+        let all_pairs = self.config.all_pairs();
 
         // Spawn WebSocket task
         let ws_event_tx = event_tx.clone();
@@ -133,6 +143,18 @@ impl App {
             self.sync_ui_state(&ws_tickers, &ws_orderbooks, &ws_candles)
                 .await;
 
+            // Sample data for recording if enabled
+            if self.recorder.is_enabled() {
+                self.sample_data_for_recording().await;
+
+                // Flush to disk if it's time
+                if self.recorder.should_flush() {
+                    if let Err(e) = self.recorder.flush() {
+                        error!("Failed to flush data: {}", e);
+                    }
+                }
+            }
+
             // Draw UI
             terminal.draw(|f| self.draw(f))?;
 
@@ -146,7 +168,7 @@ impl App {
                             }
                             KeyCode::Tab => {
                                 self.selected_pair =
-                                    (self.selected_pair + 1) % self.config.trading.pairs.len();
+                                    (self.selected_pair + 1) % all_pairs.len();
                             }
                             _ => {}
                         }
@@ -156,6 +178,13 @@ impl App {
 
             if self.should_quit {
                 break;
+            }
+        }
+
+        // Flush any remaining data before exit
+        if self.recorder.is_enabled() {
+            if let Err(e) = self.recorder.flush() {
+                error!("Failed to flush data on exit: {}", e);
             }
         }
 
@@ -177,6 +206,8 @@ impl App {
         ws_orderbooks: &Arc<tokio::sync::Mutex<crate::data::OrderBookStore>>,
         ws_candles: &Arc<tokio::sync::Mutex<crate::data::CandleStore>>,
     ) {
+        let all_pairs = self.config.all_pairs();
+
         // Sync tickers
         if let Ok(tickers) = ws_tickers.try_lock() {
             for ticker in tickers.all() {
@@ -188,7 +219,7 @@ impl App {
 
         // Sync orderbooks
         if let Ok(orderbooks) = ws_orderbooks.try_lock() {
-            for pair in &self.config.trading.pairs {
+            for pair in &all_pairs {
                 if let Some(ob) = orderbooks.get(pair) {
                     self.ui_state.orderbooks.insert(pair.clone(), ob.clone());
                 }
@@ -197,7 +228,7 @@ impl App {
 
         // Sync candles
         if let Ok(candles) = ws_candles.try_lock() {
-            for pair in &self.config.trading.pairs {
+            for pair in &all_pairs {
                 if let Some(pair_candles) = candles.get(pair) {
                     self.ui_state
                         .candles
@@ -213,6 +244,55 @@ impl App {
             self.ui_state.total_pnl = engine.total_pnl();
             self.ui_state.total_pnl_pct = engine.total_pnl_pct();
             self.ui_state.positions = engine.positions().into_iter().cloned().collect();
+        }
+    }
+
+    /// Sample data for recording based on configured intervals
+    async fn sample_data_for_recording(&mut self) {
+        // Sample crypto data
+        if self.recorder.should_sample_crypto() {
+            for pair in &self.config.trading.crypto_pairs {
+                // Sample ticker
+                if let Some(ticker) = self.ui_state.tickers.get(pair) {
+                    self.recorder.record_ticker(ticker);
+                }
+
+                // Sample orderbook
+                if let Some(orderbook) = self.ui_state.orderbooks.get(pair) {
+                    self.recorder.record_orderbook(pair, orderbook);
+                }
+
+                // Sample latest candle
+                if let Some(candles) = self.ui_state.candles.get(pair) {
+                    if let Some(candle) = candles.last() {
+                        self.recorder.record_ohlc(pair, candle);
+                    }
+                }
+            }
+            self.recorder.mark_crypto_sampled();
+        }
+
+        // Sample stock data
+        if self.recorder.should_sample_stock() {
+            for pair in &self.config.trading.stock_pairs {
+                // Sample ticker
+                if let Some(ticker) = self.ui_state.tickers.get(pair) {
+                    self.recorder.record_ticker(ticker);
+                }
+
+                // Sample orderbook
+                if let Some(orderbook) = self.ui_state.orderbooks.get(pair) {
+                    self.recorder.record_orderbook(pair, orderbook);
+                }
+
+                // Sample latest candle
+                if let Some(candles) = self.ui_state.candles.get(pair) {
+                    if let Some(candle) = candles.last() {
+                        self.recorder.record_ohlc(pair, candle);
+                    }
+                }
+            }
+            self.recorder.mark_stock_sampled();
         }
     }
 
@@ -234,6 +314,18 @@ impl App {
             }
             MarketEvent::OrderBookUpdate(_pair) => {}
             MarketEvent::CandleUpdate(_pair) => {}
+            MarketEvent::TradeUpdate(trade) => {
+                // Record every trade in real-time (no sampling for trades)
+                if self.recorder.is_enabled() {
+                    self.recorder.record_trade(
+                        &trade.pair,
+                        &trade.side,
+                        trade.price,
+                        trade.qty,
+                        trade.trade_id,
+                    );
+                }
+            }
             MarketEvent::Error(err) => {
                 tracing::error!("Market error: {}", err);
             }
@@ -294,10 +386,8 @@ impl App {
     }
 
     fn draw_chart(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let pair = self
-            .config
-            .trading
-            .pairs
+        let all_pairs = self.config.all_pairs();
+        let pair = all_pairs
             .get(self.selected_pair)
             .map(|s| s.as_str())
             .unwrap_or("BTC/USD");
@@ -314,10 +404,8 @@ impl App {
     }
 
     fn draw_orderbook(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        let pair = self
-            .config
-            .trading
-            .pairs
+        let all_pairs = self.config.all_pairs();
+        let pair = all_pairs
             .get(self.selected_pair)
             .map(|s| s.as_str())
             .unwrap_or("BTC/USD");
