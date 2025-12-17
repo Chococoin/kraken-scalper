@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
         config.recording.crypto_book_depth,
         config.recording.stock_book_depth,
         config.ui.chart_candles,
+        config.ui.chart_interval(),
     );
 
     // Get references to WebSocket stores

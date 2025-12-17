@@ -73,6 +73,25 @@ pub struct UiConfig {
     pub chart_timeframe: String,
 }
 
+impl UiConfig {
+    /// Convert chart_timeframe string to Kraken API interval (in minutes)
+    /// Valid values: 1, 5, 15, 30, 60, 240, 1440, 10080, 21600
+    pub fn chart_interval(&self) -> u32 {
+        match self.chart_timeframe.to_lowercase().as_str() {
+            "1m" | "1min" => 1,
+            "5m" | "5min" => 5,
+            "15m" | "15min" => 15,
+            "30m" | "30min" => 30,
+            "1h" | "60m" => 60,
+            "4h" | "240m" => 240,
+            "1d" | "1day" | "1440m" => 1440,
+            "1w" | "1week" => 10080,
+            "15d" => 21600,
+            _ => 1, // Default to 1 minute
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub path: String,

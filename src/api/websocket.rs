@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -36,6 +37,7 @@ pub struct KrakenWebSocket {
     stock_pairs: Vec<String>,
     crypto_book_depth: u32,
     stock_book_depth: u32,
+    candle_interval: u32,
     pub tickers: Arc<Mutex<TickerStore>>,
     pub orderbooks: Arc<Mutex<OrderBookStore>>,
     pub candles: Arc<Mutex<CandleStore>>,
@@ -49,6 +51,7 @@ impl KrakenWebSocket {
         crypto_book_depth: u32,
         stock_book_depth: u32,
         max_candles: usize,
+        candle_interval: u32,
     ) -> Self {
         Self {
             config,
@@ -56,9 +59,35 @@ impl KrakenWebSocket {
             stock_pairs,
             crypto_book_depth,
             stock_book_depth,
+            candle_interval,
             tickers: Arc::new(Mutex::new(TickerStore::new())),
             orderbooks: Arc::new(Mutex::new(OrderBookStore::new())),
             candles: Arc::new(Mutex::new(CandleStore::new(max_candles))),
+        }
+    }
+
+    /// Create with external stores (for dynamic reconnection)
+    pub fn new_with_stores(
+        config: KrakenConfig,
+        crypto_pairs: Vec<String>,
+        stock_pairs: Vec<String>,
+        crypto_book_depth: u32,
+        stock_book_depth: u32,
+        tickers: Arc<Mutex<TickerStore>>,
+        orderbooks: Arc<Mutex<OrderBookStore>>,
+        candles: Arc<Mutex<CandleStore>>,
+        candle_interval: u32,
+    ) -> Self {
+        Self {
+            config,
+            crypto_pairs,
+            stock_pairs,
+            crypto_book_depth,
+            stock_book_depth,
+            candle_interval,
+            tickers,
+            orderbooks,
+            candles,
         }
     }
 
@@ -70,6 +99,14 @@ impl KrakenWebSocket {
     }
 
     pub async fn connect(&self, event_tx: mpsc::Sender<MarketEvent>) -> Result<()> {
+        self.connect_with_signal(event_tx, Arc::new(std::sync::atomic::AtomicBool::new(false))).await
+    }
+
+    pub async fn connect_with_signal(
+        &self,
+        event_tx: mpsc::Sender<MarketEvent>,
+        should_reconnect: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
         let url = &self.config.ws_url;
         info!("Connecting to Kraken WebSocket: {}", url);
 
@@ -89,7 +126,23 @@ impl KrakenWebSocket {
         let candles = Arc::clone(&self.candles);
 
         // Process incoming messages
-        while let Some(msg) = read.next().await {
+        loop {
+            // Check for reconnection signal
+            if should_reconnect.load(std::sync::atomic::Ordering::Relaxed) {
+                info!("Reconnection requested, closing connection...");
+                let _ = event_tx.send(MarketEvent::Disconnected).await;
+                break;
+            }
+
+            // Use timeout to periodically check reconnect flag
+            let msg = tokio::time::timeout(Duration::from_millis(100), read.next()).await;
+
+            let msg = match msg {
+                Ok(Some(m)) => m,
+                Ok(None) => break, // Stream ended
+                Err(_) => continue, // Timeout, check reconnect flag again
+            };
+
             match msg {
                 Ok(Message::Text(text)) => {
                     if let Err(e) = Self::process_message(
@@ -178,13 +231,13 @@ impl KrakenWebSocket {
                 .context("Failed to send stock book subscription")?;
         }
 
-        // Subscribe to OHLC (1 minute candles) for all pairs
+        // Subscribe to OHLC candles for all pairs
         let ohlc_sub = serde_json::json!({
             "method": "subscribe",
             "params": {
                 "channel": "ohlc",
                 "symbol": all_pairs,
-                "interval": 1
+                "interval": self.candle_interval
             }
         });
         write

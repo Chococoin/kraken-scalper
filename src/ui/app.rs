@@ -62,6 +62,17 @@ impl UiState {
     }
 }
 
+/// Available timeframes for candle charts
+const TIMEFRAMES: &[(u32, &str)] = &[
+    (1, "1m"),
+    (5, "5m"),
+    (15, "15m"),
+    (30, "30m"),
+    (60, "1h"),
+    (240, "4h"),
+    (1440, "1d"),
+];
+
 pub struct App {
     config: Config,
     engine: Arc<Mutex<TradingEngine>>,
@@ -72,6 +83,10 @@ pub struct App {
     should_quit: bool,
     ui_state: UiState,
     all_pairs: Vec<String>,
+    // Timeframe management
+    timeframe_index: usize,
+    timeframe_interval: Arc<std::sync::atomic::AtomicU32>,
+    should_reconnect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl App {
@@ -88,6 +103,13 @@ impl App {
 
         let all_pairs = config.all_pairs();
 
+        // Find initial timeframe index
+        let initial_interval = config.ui.chart_interval();
+        let timeframe_index = TIMEFRAMES
+            .iter()
+            .position(|(i, _)| *i == initial_interval)
+            .unwrap_or(0);
+
         Ok(Self {
             config,
             engine: Arc::new(Mutex::new(engine)),
@@ -98,7 +120,32 @@ impl App {
             should_quit: false,
             ui_state,
             all_pairs,
+            timeframe_index,
+            timeframe_interval: Arc::new(std::sync::atomic::AtomicU32::new(initial_interval)),
+            should_reconnect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// Get current timeframe label
+    fn current_timeframe(&self) -> &'static str {
+        TIMEFRAMES.get(self.timeframe_index).map(|(_, s)| *s).unwrap_or("1m")
+    }
+
+    /// Cycle to next timeframe
+    fn cycle_timeframe(&mut self) {
+        self.timeframe_index = (self.timeframe_index + 1) % TIMEFRAMES.len();
+        let (interval, label) = TIMEFRAMES[self.timeframe_index];
+
+        // Update shared interval
+        self.timeframe_interval.store(interval, std::sync::atomic::Ordering::Relaxed);
+
+        // Signal reconnection needed
+        self.should_reconnect.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Clear candles
+        self.ui_state.candles.clear();
+
+        tracing::info!("Timeframe changed to {} ({}min)", label, interval);
     }
 
     fn selected_pair(&self) -> &str {
@@ -119,28 +166,55 @@ impl App {
         // Create event channel
         let (event_tx, mut event_rx) = mpsc::channel::<MarketEvent>(100);
 
-        // Start WebSocket connection with separate crypto/stock pairs and depths
-        let ws = KrakenWebSocket::new(
-            self.config.kraken.clone(),
-            self.config.trading.crypto_pairs.clone(),
-            self.config.trading.stock_pairs.clone(),
-            self.config.recording.crypto_book_depth,
-            self.config.recording.stock_book_depth,
-            self.config.ui.chart_candles,
-        );
+        // Shared state for WebSocket task
+        let ws_tickers = Arc::new(Mutex::new(crate::data::TickerStore::new()));
+        let ws_orderbooks = Arc::new(Mutex::new(crate::data::OrderBookStore::new()));
+        let ws_candles = Arc::new(Mutex::new(crate::data::CandleStore::new(self.config.ui.chart_candles)));
 
-        let ws_tickers = Arc::clone(&ws.tickers);
-        let ws_orderbooks = Arc::clone(&ws.orderbooks);
-        let ws_candles = Arc::clone(&ws.candles);
-
-        // Spawn WebSocket task
+        // Clone config for WebSocket task
+        let ws_config = self.config.clone();
         let ws_event_tx = event_tx.clone();
+        let timeframe_interval = Arc::clone(&self.timeframe_interval);
+        let should_reconnect = Arc::clone(&self.should_reconnect);
+        let ws_tickers_clone = Arc::clone(&ws_tickers);
+        let ws_orderbooks_clone = Arc::clone(&ws_orderbooks);
+        let ws_candles_clone = Arc::clone(&ws_candles);
+
+        // Spawn WebSocket task with dynamic interval support
         tokio::spawn(async move {
             loop {
-                if let Err(e) = ws.connect(ws_event_tx.clone()).await {
-                    tracing::error!("WebSocket error: {}", e);
+                // Get current interval
+                let interval = timeframe_interval.load(std::sync::atomic::Ordering::Relaxed);
+
+                // Clear reconnect flag
+                should_reconnect.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                // Create WebSocket with current interval
+                let ws = KrakenWebSocket::new_with_stores(
+                    ws_config.kraken.clone(),
+                    ws_config.trading.crypto_pairs.clone(),
+                    ws_config.trading.stock_pairs.clone(),
+                    ws_config.recording.crypto_book_depth,
+                    ws_config.recording.stock_book_depth,
+                    Arc::clone(&ws_tickers_clone),
+                    Arc::clone(&ws_orderbooks_clone),
+                    Arc::clone(&ws_candles_clone),
+                    interval,
+                );
+
+                tracing::info!("Connecting with {}min candles...", interval);
+
+                // Connect and run until error or reconnect signal
+                if let Err(e) = ws.connect_with_signal(ws_event_tx.clone(), Arc::clone(&should_reconnect)).await {
+                    if !should_reconnect.load(std::sync::atomic::Ordering::Relaxed) {
+                        tracing::error!("WebSocket error: {}", e);
+                    }
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+
+                // Clear candles on reconnect
+                ws_candles_clone.lock().await.clear();
+
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 tracing::info!("Reconnecting to WebSocket...");
             }
         });
@@ -276,6 +350,11 @@ impl App {
                 let pair = self.selected_pair();
                 self.ui_state.order_dialog = Some(OrderDialogState::new_sell(pair));
                 self.ui_state.input.show_sell();
+            }
+
+            // Timeframe cycling
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                self.cycle_timeframe();
             }
 
             _ => {}
@@ -687,6 +766,7 @@ impl App {
             connected: self.connected,
             selected_pair: self.selected_pair(),
             all_pairs: &self.all_pairs,
+            timeframe: self.current_timeframe(),
         };
 
         // Render current view

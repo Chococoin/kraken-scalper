@@ -15,6 +15,7 @@ pub struct StatusWidget<'a> {
     total_pnl_pct: Decimal,
     is_paper: bool,
     connected: bool,
+    timeframe: &'a str,
 }
 
 impl<'a> StatusWidget<'a> {
@@ -26,6 +27,7 @@ impl<'a> StatusWidget<'a> {
         total_pnl_pct: Decimal,
         is_paper: bool,
         connected: bool,
+        timeframe: &'a str,
     ) -> Self {
         Self {
             tickers,
@@ -35,6 +37,7 @@ impl<'a> StatusWidget<'a> {
             total_pnl_pct,
             is_paper,
             connected,
+            timeframe,
         }
     }
 }
@@ -135,9 +138,18 @@ impl Widget for StatusWidget<'_> {
         );
         buf.set_string(inner.x + 50, y, &pnl_str, Style::default().fg(pnl_color));
 
+        // Timeframe indicator
+        let tf_str = format!("[{}]", self.timeframe);
+        buf.set_string(
+            inner.x + 80,
+            y,
+            &tf_str,
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        );
+
         // Help text at the end
-        if inner.width > 90 {
-            let help = "Press 'q' to quit";
+        if inner.width > 100 {
+            let help = "'t' timeframe | 'q' quit | '?' help";
             buf.set_string(
                 inner.x + inner.width - help.len() as u16 - 1,
                 y,

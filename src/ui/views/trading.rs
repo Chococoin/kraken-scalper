@@ -1,11 +1,8 @@
-//! Trading view - main trading interface with chart, orderbook, positions, trades
+//! Trading view - main trading interface with chart, orderbook, positions
 
 use super::{ViewRenderer, ViewState};
 use crate::ui::charts::PriceChart;
-use crate::ui::widgets::{
-    orderbook::OrderBookWidget, positions::PositionsWidget, status::StatusWidget,
-    trades::TradesWidget,
-};
+use crate::ui::widgets::{orderbook::OrderBookWidget, positions::PositionsWidget, status::StatusWidget};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     Frame,
@@ -28,38 +25,30 @@ impl Default for TradingView {
 
 impl ViewRenderer for TradingView {
     fn render(&self, f: &mut Frame, area: Rect, state: &ViewState) {
-        // Main layout: status bar + content
+        // Main layout: status bar + chart + bottom row
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(10)])
+            .constraints([
+                Constraint::Length(4),      // Status bar
+                Constraint::Percentage(50), // Chart (full width)
+                Constraint::Min(10),        // Order book + Positions
+            ])
             .split(area);
 
         // Render status bar
         render_status(f, main_chunks[0], state);
 
-        // Content layout: left (chart + orderbook) + right (positions + trades)
-        let content_chunks = Layout::default()
+        // Render chart (full width)
+        render_chart(f, main_chunks[1], state);
+
+        // Bottom row: order book + positions side by side
+        let bottom_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(main_chunks[1]);
-
-        // Left side: chart on top, orderbook on bottom
-        let left_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(content_chunks[0]);
-
-        render_chart(f, left_chunks[0], state);
-        render_orderbook(f, left_chunks[1], state);
-
-        // Right side: positions on top, trades on bottom
-        let right_chunks = Layout::default()
-            .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(content_chunks[1]);
+            .split(main_chunks[2]);
 
-        render_positions(f, right_chunks[0], state);
-        render_trades(f, right_chunks[1], state);
+        render_orderbook(f, bottom_chunks[0], state);
+        render_positions(f, bottom_chunks[1], state);
     }
 }
 
@@ -74,6 +63,7 @@ fn render_status(f: &mut Frame, area: Rect, state: &ViewState) {
         state.total_pnl_pct,
         state.is_paper,
         state.connected,
+        state.timeframe,
     );
 
     f.render_widget(widget, area);
@@ -100,10 +90,5 @@ fn render_orderbook(f: &mut Frame, area: Rect, state: &ViewState) {
 fn render_positions(f: &mut Frame, area: Rect, state: &ViewState) {
     let positions: Vec<&_> = state.positions.iter().collect();
     let widget = PositionsWidget::new(positions);
-    f.render_widget(widget, area);
-}
-
-fn render_trades(f: &mut Frame, area: Rect, state: &ViewState) {
-    let widget = TradesWidget::new(state.recent_trades);
     f.render_widget(widget, area);
 }

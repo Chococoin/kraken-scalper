@@ -23,3 +23,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# SQLite WAL files
+scalper.db-shm
+scalper.db-wal
+scalper.log

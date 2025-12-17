@@ -32,6 +32,7 @@ pub struct ViewState<'a> {
     pub connected: bool,
     pub selected_pair: &'a str,
     pub all_pairs: &'a [String],
+    pub timeframe: &'a str,
 }
 
 /// Trait for renderable views

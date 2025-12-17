@@ -118,4 +118,9 @@ impl CandleStore {
             .map(|d| d.iter().rev().take(n).rev().collect())
             .unwrap_or_default()
     }
+
+    /// Clear all candles (used when changing timeframe)
+    pub fn clear(&mut self) {
+        self.candles.clear();
+    }
 }
