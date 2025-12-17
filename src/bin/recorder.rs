@@ -213,19 +213,17 @@ async fn main() -> Result<()> {
             recorder.mark_stock_sampled();
             if sampled > 0 {
                 info!("Sampled stock data: {} pairs", sampled);
-            }
-        }
 
-        // Flush to disk periodically
-        if recorder.should_flush() {
-            let stats = recorder.buffer_stats();
-            info!(
-                "Flushing - crypto: {}t/{}b/{}o/{}tr, stocks: {}t/{}b/{}o/{}tr",
-                stats.0, stats.1, stats.2, stats.3,
-                stats.4, stats.5, stats.6, stats.7
-            );
-            if let Err(e) = recorder.flush() {
-                error!("Failed to flush: {}", e);
+                // Flush immediately after stock sampling to ensure stock data is saved
+                let stats = recorder.buffer_stats();
+                info!(
+                    "Flushing - crypto: {}t/{}b/{}o/{}tr, stocks: {}t/{}b/{}o/{}tr",
+                    stats.0, stats.1, stats.2, stats.3,
+                    stats.4, stats.5, stats.6, stats.7
+                );
+                if let Err(e) = recorder.flush() {
+                    error!("Failed to flush: {}", e);
+                }
             }
         }
 

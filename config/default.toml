@@ -19,13 +19,10 @@ crypto_pairs = [
     "MATIC/USD", "MATIC/EUR"
 ]
 
-# Stock pairs to monitor (tokenized stocks)
+# Stock pairs to monitor (xStocks - tokenized stocks)
 stock_pairs = [
-    "GOOGL/USD", "GOOGL/EUR",
-    "AAPL/USD", "AAPL/EUR",
-    "TSLA/USD", "TSLA/EUR",
-    "MSFT/USD", "MSFT/EUR",
-    "NVDA/USD", "NVDA/EUR"
+    "TSLAx/USD", "NVDAx/USD", "GOOGLx/USD", "AAPLx/USD", "MSTRx/USD",
+    "SPYx/USD", "TQQQx/USD", "PLTRx/USD", "COINx/USD", "NFLXx/USD"
 ]
 
 # Trading mode: "paper" or "live"
@@ -51,14 +48,14 @@ data_dir = "data"
 
 # Sampling intervals
 crypto_sample_interval_secs = 30    # Sample crypto data every 30 seconds
-stock_sample_interval_secs = 1800   # Sample stock data every 30 minutes
+stock_sample_interval_secs = 300    # Sample stock data every 5 minutes
 
 # Order book depth
 crypto_book_depth = 100    # 100 levels for crypto
 stock_book_depth = 10      # 10 levels for stocks
 
 # Flush interval (write to disk)
-flush_interval_secs = 3600  # Write parquet files every hour
+flush_interval_secs = 300   # Write parquet files every 5 minutes
 
 [ui]
 # Refresh rate in milliseconds
