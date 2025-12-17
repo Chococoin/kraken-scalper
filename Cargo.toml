@@ -57,6 +57,14 @@ url = "2"
 parquet = "54"
 arrow = "54"
 
+[[bin]]
+name = "scalper"
+path = "src/main.rs"
+
+[[bin]]
+name = "recorder"
+path = "src/bin/recorder.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
