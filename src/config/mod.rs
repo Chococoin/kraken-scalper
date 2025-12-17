@@ -11,6 +11,8 @@ pub struct Config {
     pub recording: RecordingConfig,
     pub ui: UiConfig,
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub backtest: BacktestConfigFile,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +68,25 @@ pub struct UiConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BacktestConfigFile {
+    pub default_pair: String,
+    pub initial_balance: f64,
+    pub commission_pct: f64,
+    pub slippage_pct: f64,
+}
+
+impl Default for BacktestConfigFile {
+    fn default() -> Self {
+        Self {
+            default_pair: "BTC/USD".to_string(),
+            initial_balance: 10000.0,
+            commission_pct: 0.26,
+            slippage_pct: 0.05,
+        }
+    }
 }
 
 impl Config {

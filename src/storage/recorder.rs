@@ -70,6 +70,7 @@ pub struct TradeSnapshot {
 pub struct DataRecorder {
     config: RecordingConfig,
     crypto_pairs: Vec<String>,
+    #[allow(dead_code)]
     stock_pairs: Vec<String>,
 
     // Buffers for crypto data

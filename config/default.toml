@@ -71,3 +71,10 @@ chart_timeframe = "1m"     # Candle timeframe
 [database]
 # SQLite database path
 path = "scalper.db"
+
+[backtest]
+# Default settings for backtesting
+default_pair = "BTC/USD"
+initial_balance = 10000.0
+commission_pct = 0.26          # Kraken taker fee
+slippage_pct = 0.05            # Simulated slippage
