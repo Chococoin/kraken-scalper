@@ -8,9 +8,10 @@
 use anyhow::Result;
 use scalper::api::{KrakenWebSocket, MarketEvent};
 use scalper::config::Config;
-use scalper::storage::DataRecorder;
+use scalper::storage::{DataRecorder, HfUploader};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -44,6 +45,38 @@ async fn main() -> Result<()> {
 
     // Create recorder
     let mut recorder = DataRecorder::new(&config);
+
+    // Create HuggingFace uploader if enabled
+    let mut hf_uploader = if config.huggingface.enabled {
+        match std::env::var("HF_TOKEN") {
+            Ok(token) => {
+                info!(
+                    "HuggingFace upload enabled for repo: {}",
+                    config.huggingface.repo_id
+                );
+                match HfUploader::new(
+                    &config.huggingface.repo_id,
+                    Path::new(&config.recording.data_dir),
+                    &token,
+                    config.huggingface.upload_delay_hours,
+                ) {
+                    Ok(uploader) => Some(uploader),
+                    Err(e) => {
+                        error!("Failed to create HuggingFace uploader: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                error!("HuggingFace upload enabled but HF_TOKEN not set!");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut last_hf_sync = Instant::now();
+    let hf_upload_interval = Duration::from_secs(config.huggingface.upload_interval_secs);
 
     // Create event channel
     let (event_tx, mut event_rx) = mpsc::channel::<MarketEvent>(1000);
@@ -195,6 +228,28 @@ async fn main() -> Result<()> {
                 error!("Failed to flush: {}", e);
             }
         }
+
+        // Sync to HuggingFace periodically
+        if let Some(ref mut uploader) = hf_uploader {
+            if last_hf_sync.elapsed() >= hf_upload_interval {
+                info!("Syncing data to HuggingFace...");
+                match uploader.sync().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Uploaded {} files to HuggingFace", count);
+                        }
+                        let (files, bytes) = uploader.stats();
+                        info!(
+                            "HuggingFace stats: {} files uploaded ({:.2} MB total)",
+                            files,
+                            bytes as f64 / 1_000_000.0
+                        );
+                    }
+                    Err(e) => error!("HuggingFace sync failed: {}", e),
+                }
+                last_hf_sync = Instant::now();
+            }
+        }
     }
 
     // Final flush
@@ -209,6 +264,19 @@ async fn main() -> Result<()> {
         error!("Failed to flush on shutdown: {}", e);
     } else {
         info!("Data flushed successfully");
+    }
+
+    // Final HuggingFace sync
+    if let Some(ref mut uploader) = hf_uploader {
+        info!("Final sync to HuggingFace...");
+        match uploader.sync().await {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Uploaded {} files in final sync", count);
+                }
+            }
+            Err(e) => error!("Final HuggingFace sync failed: {}", e),
+        }
     }
 
     info!("Recorder daemon stopped");

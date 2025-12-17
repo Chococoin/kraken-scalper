@@ -78,3 +78,10 @@ default_pair = "BTC/USD"
 initial_balance = 10000.0
 commission_pct = 0.26          # Kraken taker fee
 slippage_pct = 0.05            # Simulated slippage
+
+[huggingface]
+# HuggingFace Datasets integration
+enabled = true                                # Enable automatic upload
+repo_id = "Abraxasccs/kraken-market-data"     # Dataset repository ID
+upload_interval_secs = 3600               # Check for uploads every hour
+upload_delay_hours = 1                    # Wait 1 hour before uploading (ensure file complete)

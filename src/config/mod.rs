@@ -13,6 +13,8 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub backtest: BacktestConfigFile,
+    #[serde(default)]
+    pub huggingface: HuggingFaceConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +87,25 @@ impl Default for BacktestConfigFile {
             initial_balance: 10000.0,
             commission_pct: 0.26,
             slippage_pct: 0.05,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HuggingFaceConfig {
+    pub enabled: bool,
+    pub repo_id: String,
+    pub upload_interval_secs: u64,
+    pub upload_delay_hours: u32,
+}
+
+impl Default for HuggingFaceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repo_id: String::new(),
+            upload_interval_secs: 3600,
+            upload_delay_hours: 1,
         }
     }
 }
