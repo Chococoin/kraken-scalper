@@ -72,6 +72,10 @@ path = "src/bin/recorder.rs"
 name = "backtest"
 path = "src/bin/backtest.rs"
 
+[[bin]]
+name = "hf_sync"
+path = "src/bin/hf_sync.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
