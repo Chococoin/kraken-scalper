@@ -1,0 +1,40 @@
+# Kraken Scalper Configuration
+
+[kraken]
+# API credentials (leave empty for paper trading only)
+api_key = ""
+api_secret = ""
+
+# WebSocket endpoints
+ws_url = "wss://ws.kraken.com/v2"
+ws_auth_url = "wss://ws-auth.kraken.com/v2"
+
+[trading]
+# Trading pairs to monitor (Kraken format)
+pairs = ["BTC/USD", "ETH/USD"]
+
+# Trading mode: "paper" or "live"
+mode = "paper"
+
+# Paper trading initial balance (USD)
+paper_balance = 10000.0
+
+[strategy]
+# Scalping parameters
+min_spread_pct = 0.1       # Minimum spread to consider (%)
+take_profit_pct = 0.15     # Take profit target (%)
+stop_loss_pct = 0.1        # Stop loss (%)
+max_position_size = 0.1    # Max position as % of balance
+cooldown_seconds = 30      # Seconds between trades
+
+[ui]
+# Refresh rate in milliseconds
+refresh_rate_ms = 100
+
+# Chart settings
+chart_candles = 60         # Number of candles to display
+chart_timeframe = "1m"     # Candle timeframe
+
+[database]
+# SQLite database path
+path = "scalper.db"
