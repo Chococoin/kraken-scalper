@@ -25,8 +25,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.metrics import (
+    mean_absolute_error, mean_squared_error, r2_score,
+    accuracy_score, precision_score, recall_score, f1_score, classification_report
+)
 from sklearn.model_selection import TimeSeriesSplit
 from tqdm import tqdm
 
@@ -442,19 +445,270 @@ def create_features(
 # Target Creation
 # =============================================================================
 
-def create_targets(df: pd.DataFrame, horizons: List[int] = [5, 15, 30, 60]) -> pd.DataFrame:
-    """Create forward return targets for different horizons."""
+def triple_barrier_labels(
+    df: pd.DataFrame,
+    horizon: int,
+    take_profit: float = None,
+    stop_loss: float = None,
+    use_atr: bool = True,
+    atr_tp_mult: float = 2.0,
+    atr_sl_mult: float = 1.0,
+    min_return: float = 0.001,
+) -> pd.Series:
+    """
+    Create labels using the Triple Barrier Method.
+
+    Three barriers:
+    1. Upper barrier (take profit): Label = 1 if hit first
+    2. Lower barrier (stop loss): Label = -1 if hit first
+    3. Vertical barrier (time): Label = 0 if neither hit within horizon
+
+    Args:
+        df: DataFrame with price data
+        horizon: Maximum periods to hold (vertical barrier)
+        take_profit: Fixed take profit level (% as decimal, e.g., 0.02 for 2%)
+        stop_loss: Fixed stop loss level (% as decimal, e.g., 0.01 for 1%)
+        use_atr: If True, use ATR for dynamic barriers
+        atr_tp_mult: Multiplier for ATR take profit (default 2x ATR)
+        atr_sl_mult: Multiplier for ATR stop loss (default 1x ATR)
+        min_return: Minimum return threshold for label=0 classification
+
+    Returns:
+        Series with labels: 1 (take profit), -1 (stop loss), 0 (expired/neutral)
+    """
+    price_col = 'close' if 'close' in df.columns else 'last'
+    prices = df[price_col].values
+    n = len(prices)
+
+    labels = np.zeros(n)
+    labels[:] = np.nan
+
+    # Calculate ATR if needed
+    if use_atr and 'atr' in df.columns:
+        atr = df['atr'].values
+    elif use_atr and all(col in df.columns for col in ['high', 'low', 'close']):
+        # Calculate ATR on the fly
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        tr = np.maximum(
+            high - low,
+            np.maximum(
+                np.abs(high - np.roll(close, 1)),
+                np.abs(low - np.roll(close, 1))
+            )
+        )
+        tr[0] = high[0] - low[0]
+        atr = pd.Series(tr).rolling(14).mean().values
+    else:
+        atr = None
+
+    # Process each point
+    for i in range(n - horizon):
+        entry_price = prices[i]
+
+        if np.isnan(entry_price) or entry_price <= 0:
+            continue
+
+        # Determine barriers
+        if use_atr and atr is not None and not np.isnan(atr[i]) and atr[i] > 0:
+            # Dynamic barriers based on ATR
+            tp_level = entry_price * (1 + atr_tp_mult * atr[i] / entry_price)
+            sl_level = entry_price * (1 - atr_sl_mult * atr[i] / entry_price)
+        else:
+            # Fixed barriers
+            tp_pct = take_profit if take_profit is not None else 0.01  # 1% default
+            sl_pct = stop_loss if stop_loss is not None else 0.005    # 0.5% default
+            tp_level = entry_price * (1 + tp_pct)
+            sl_level = entry_price * (1 - sl_pct)
+
+        # Look forward through the horizon
+        label = 0  # Default: expired without hitting barrier
+        exit_return = 0
+
+        for j in range(1, horizon + 1):
+            if i + j >= n:
+                break
+
+            current_price = prices[i + j]
+
+            if np.isnan(current_price):
+                continue
+
+            # Check upper barrier (take profit)
+            if current_price >= tp_level:
+                label = 1
+                break
+
+            # Check lower barrier (stop loss)
+            if current_price <= sl_level:
+                label = -1
+                break
+
+        # If no barrier hit, check final return for label
+        if label == 0 and i + horizon < n:
+            final_price = prices[i + horizon]
+            if not np.isnan(final_price):
+                exit_return = (final_price - entry_price) / entry_price
+                # Use min_return threshold to classify neutral outcomes
+                if exit_return > min_return:
+                    label = 1
+                elif exit_return < -min_return:
+                    label = -1
+                # else stays 0
+
+        labels[i] = label
+
+    return pd.Series(labels, index=df.index, name=f'tb_label_{horizon}')
+
+
+def get_barrier_touches(
+    df: pd.DataFrame,
+    horizon: int,
+    take_profit: float = None,
+    stop_loss: float = None,
+    use_atr: bool = True,
+    atr_tp_mult: float = 2.0,
+    atr_sl_mult: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Get detailed information about barrier touches.
+
+    Returns DataFrame with:
+    - label: 1 (TP), -1 (SL), 0 (expired)
+    - touch_time: periods until barrier touch
+    - exit_return: actual return at exit
+    - tp_level: take profit price level
+    - sl_level: stop loss price level
+    """
+    price_col = 'close' if 'close' in df.columns else 'last'
+    prices = df[price_col].values
+    n = len(prices)
+
+    results = {
+        'label': np.full(n, np.nan),
+        'touch_time': np.full(n, np.nan),
+        'exit_return': np.full(n, np.nan),
+        'tp_level': np.full(n, np.nan),
+        'sl_level': np.full(n, np.nan),
+    }
+
+    # Calculate ATR
+    if use_atr and 'atr' in df.columns:
+        atr = df['atr'].values
+    elif use_atr and all(col in df.columns for col in ['high', 'low', 'close']):
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        tr = np.maximum(
+            high - low,
+            np.maximum(
+                np.abs(high - np.roll(close, 1)),
+                np.abs(low - np.roll(close, 1))
+            )
+        )
+        tr[0] = high[0] - low[0]
+        atr = pd.Series(tr).rolling(14).mean().values
+    else:
+        atr = None
+
+    for i in range(n - horizon):
+        entry_price = prices[i]
+
+        if np.isnan(entry_price) or entry_price <= 0:
+            continue
+
+        # Determine barriers
+        if use_atr and atr is not None and not np.isnan(atr[i]) and atr[i] > 0:
+            tp_level = entry_price * (1 + atr_tp_mult * atr[i] / entry_price)
+            sl_level = entry_price * (1 - atr_sl_mult * atr[i] / entry_price)
+        else:
+            tp_pct = take_profit if take_profit is not None else 0.01
+            sl_pct = stop_loss if stop_loss is not None else 0.005
+            tp_level = entry_price * (1 + tp_pct)
+            sl_level = entry_price * (1 - sl_pct)
+
+        results['tp_level'][i] = tp_level
+        results['sl_level'][i] = sl_level
+
+        label = 0
+        touch_time = horizon
+        exit_price = prices[min(i + horizon, n - 1)]
+
+        for j in range(1, horizon + 1):
+            if i + j >= n:
+                break
+
+            current_price = prices[i + j]
+
+            if np.isnan(current_price):
+                continue
+
+            if current_price >= tp_level:
+                label = 1
+                touch_time = j
+                exit_price = current_price
+                break
+
+            if current_price <= sl_level:
+                label = -1
+                touch_time = j
+                exit_price = current_price
+                break
+
+        results['label'][i] = label
+        results['touch_time'][i] = touch_time
+        results['exit_return'][i] = (exit_price - entry_price) / entry_price if not np.isnan(exit_price) else np.nan
+
+    return pd.DataFrame(results, index=df.index)
+
+
+def create_targets(
+    df: pd.DataFrame,
+    horizons: List[int] = [5, 15, 30, 60],
+    use_triple_barrier: bool = False,
+    tb_take_profit: float = None,
+    tb_stop_loss: float = None,
+    tb_use_atr: bool = True,
+) -> pd.DataFrame:
+    """
+    Create forward return targets for different horizons.
+
+    Args:
+        df: DataFrame with price data
+        horizons: List of forward-looking periods
+        use_triple_barrier: If True, also create triple barrier labels
+        tb_take_profit: Fixed take profit for triple barrier (% as decimal)
+        tb_stop_loss: Fixed stop loss for triple barrier (% as decimal)
+        tb_use_atr: Use ATR for dynamic barriers
+
+    Returns:
+        DataFrame with target columns added
+    """
     df = df.copy()
 
     price_col = 'close' if 'close' in df.columns else 'last'
     prices = df[price_col]
 
     for h in horizons:
-        # Forward return
+        # Forward return (simple)
         df[f'target_{h}m'] = prices.shift(-h) / prices - 1
 
         # Direction (1 = up, 0 = down)
         df[f'direction_{h}m'] = (df[f'target_{h}m'] > 0).astype(int)
+
+        # Triple barrier labels
+        if use_triple_barrier:
+            df[f'tb_label_{h}m'] = triple_barrier_labels(
+                df,
+                horizon=h,
+                take_profit=tb_take_profit,
+                stop_loss=tb_stop_loss,
+                use_atr=tb_use_atr,
+            )
+
+            # Also create binary classification target (1=profit, 0=loss/neutral)
+            df[f'tb_binary_{h}m'] = (df[f'tb_label_{h}m'] == 1).astype(int)
 
     return df
 
@@ -578,19 +832,255 @@ def train_models(
     return results
 
 
-# =============================================================================
-# Backtesting
-# =============================================================================
-
 @dataclass
-class BacktestResult:
-    equity_curve: pd.Series
-    returns: pd.Series
-    total_return: float
-    sharpe_ratio: float
-    max_drawdown: float
-    win_rate: float
-    n_trades: int
+class ClassificationResult:
+    """Results from classification model training."""
+    name: str
+    model: object
+    accuracy_scores: List[float]
+    precision_scores: List[float]
+    recall_scores: List[float]
+    f1_scores: List[float]
+    feature_importance: Dict[str, float]
+    class_distribution: Dict[int, int]
+
+
+def train_classification_models(
+    df: pd.DataFrame,
+    target_col: str,
+    feature_cols: List[str],
+    n_splits: int = 5,
+) -> List[ClassificationResult]:
+    """
+    Train classification models for triple barrier labels.
+
+    Args:
+        df: DataFrame with features and target
+        target_col: Column name for triple barrier labels (-1, 0, 1)
+        feature_cols: List of feature column names
+        n_splits: Number of cross-validation splits
+
+    Returns:
+        List of ClassificationResult objects
+    """
+    # Prepare data
+    X = df[feature_cols].values
+    y = df[target_col].values
+
+    # Remove rows with NaN
+    mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
+    X = X[mask]
+    y = y[mask].astype(int)
+
+    if len(X) < 100:
+        print(f"Warning: Only {len(X)} samples available for training")
+        return []
+
+    # Class distribution
+    unique, counts = np.unique(y, return_counts=True)
+    class_dist = dict(zip(unique.astype(int), counts.astype(int)))
+
+    print(f"\nTraining CLASSIFICATION with {len(X)} samples, {len(feature_cols)} features")
+    print(f"Class distribution: {class_dist}")
+    for label, count in class_dist.items():
+        label_name = {-1: 'Stop Loss', 0: 'Expired', 1: 'Take Profit'}.get(label, str(label))
+        print(f"  {label_name}: {count} ({count/len(y)*100:.1f}%)")
+
+    # Models to train
+    models = {
+        'RF_Classifier': RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_leaf=10,
+            n_jobs=-1,
+            random_state=42,
+            class_weight='balanced'  # Handle imbalanced classes
+        ),
+    }
+
+    if HAS_XGB:
+        models['XGB_Classifier'] = xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=5,
+            learning_rate=0.1,
+            min_child_weight=10,
+            random_state=42,
+            verbosity=0,
+            use_label_encoder=False,
+            eval_metric='mlogloss'
+        )
+
+    if HAS_LGB:
+        models['LGB_Classifier'] = lgb.LGBMClassifier(
+            n_estimators=100,
+            max_depth=5,
+            learning_rate=0.1,
+            min_child_samples=10,
+            random_state=42,
+            verbose=-1,
+            class_weight='balanced'
+        )
+
+    # Time series cross-validation
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    results = []
+
+    for name, model in models.items():
+        print(f"\nTraining {name}...")
+
+        acc_scores = []
+        prec_scores = []
+        rec_scores = []
+        f1_scores_list = []
+
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            # Metrics
+            acc = accuracy_score(y_test, y_pred)
+            # Use weighted average for multiclass
+            prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+            rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+            f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+
+            acc_scores.append(acc)
+            prec_scores.append(prec)
+            rec_scores.append(rec)
+            f1_scores_list.append(f1)
+
+        # Feature importance
+        if hasattr(model, 'feature_importances_'):
+            importance = dict(zip(feature_cols, model.feature_importances_))
+        else:
+            importance = {}
+
+        result = ClassificationResult(
+            name=name,
+            model=model,
+            accuracy_scores=acc_scores,
+            precision_scores=prec_scores,
+            recall_scores=rec_scores,
+            f1_scores=f1_scores_list,
+            feature_importance=importance,
+            class_distribution=class_dist
+        )
+        results.append(result)
+
+        print(f"  Accuracy = {np.mean(acc_scores):.2%} (+/- {np.std(acc_scores):.2%})")
+        print(f"  Precision = {np.mean(prec_scores):.2%} (+/- {np.std(prec_scores):.2%})")
+        print(f"  Recall = {np.mean(rec_scores):.2%} (+/- {np.std(rec_scores):.2%})")
+        print(f"  F1 Score = {np.mean(f1_scores_list):.2%} (+/- {np.std(f1_scores_list):.2%})")
+
+    # Print detailed classification report for best model
+    if results:
+        best = max(results, key=lambda r: np.mean(r.f1_scores))
+        print(f"\nBest Classifier: {best.name}")
+
+        # Final predictions on last fold
+        y_pred_final = best.model.predict(X)
+        print("\nClassification Report (Full Dataset):")
+        print(classification_report(
+            y, y_pred_final,
+            target_names=['Stop Loss (-1)', 'Expired (0)', 'Take Profit (1)'],
+            zero_division=0
+        ))
+
+    return results
+
+
+def backtest_triple_barrier(
+    df: pd.DataFrame,
+    predictions: np.ndarray,
+    price_col: str = 'last',
+    hold_periods: int = 30,
+    transaction_cost: float = 0.001,
+) -> BacktestResult:
+    """
+    Backtest strategy using triple barrier predictions.
+
+    Args:
+        df: DataFrame with price data
+        predictions: Array of predicted labels (1=long, -1=avoid, 0=neutral)
+        price_col: Price column name
+        hold_periods: How long to hold position after entry
+        transaction_cost: Cost per trade (as decimal)
+
+    Returns:
+        BacktestResult with equity curve and metrics
+    """
+    prices = df[price_col].values
+    n = len(prices)
+
+    # Align predictions
+    predictions = predictions[:n]
+
+    equity = [1.0]
+    returns_list = []
+    n_trades = 0
+    wins = 0
+
+    i = 0
+    while i < n - hold_periods:
+        if predictions[i] == 1:  # Only trade when model predicts take profit
+            entry_price = prices[i]
+            exit_price = prices[min(i + hold_periods, n - 1)]
+
+            trade_return = (exit_price - entry_price) / entry_price
+            trade_return -= transaction_cost * 2  # Entry + exit cost
+
+            equity.append(equity[-1] * (1 + trade_return))
+            returns_list.append(trade_return)
+
+            n_trades += 1
+            if trade_return > 0:
+                wins += 1
+
+            i += hold_periods  # Skip ahead after trade
+        else:
+            equity.append(equity[-1])
+            returns_list.append(0)
+            i += 1
+
+    # Pad equity to match dataframe
+    while len(equity) < n:
+        equity.append(equity[-1])
+    while len(returns_list) < n - 1:
+        returns_list.append(0)
+
+    equity_series = pd.Series(equity[:n], index=df.index[:n])
+    returns_series = pd.Series(returns_list)
+
+    # Metrics
+    total_return = equity[-1] - 1
+
+    non_zero_returns = [r for r in returns_list if r != 0]
+    if len(non_zero_returns) > 0 and np.std(non_zero_returns) > 0:
+        sharpe = np.mean(non_zero_returns) / np.std(non_zero_returns) * np.sqrt(252 * 24)  # Annualized
+    else:
+        sharpe = 0
+
+    # Max drawdown
+    equity_arr = np.array(equity)
+    peak = np.maximum.accumulate(equity_arr)
+    drawdown = (peak - equity_arr) / peak
+    max_dd = np.max(drawdown) if len(drawdown) > 0 else 0
+
+    win_rate = wins / n_trades if n_trades > 0 else 0
+
+    return BacktestResult(
+        equity_curve=equity_series,
+        returns=returns_series,
+        total_return=total_return,
+        sharpe_ratio=sharpe,
+        max_drawdown=max_dd,
+        win_rate=win_rate,
+        n_trades=n_trades
+    )
 
 
 def backtest_strategy(
@@ -788,8 +1278,8 @@ def plot_predictions_vs_actual(
 def get_feature_columns(df: pd.DataFrame) -> List[str]:
     """Get list of feature columns (exclude targets and metadata)."""
     exclude_patterns = [
-        'target_', 'direction_', 'datetime', 'ts', 'pair',
-        'bids', 'asks', '_json'
+        'target_', 'direction_', 'tb_label_', 'tb_binary_',
+        'datetime', 'ts', 'pair', 'bids', 'asks', '_json'
     ]
 
     feature_cols = []
@@ -811,6 +1301,18 @@ def main():
     parser.add_argument('--save-model', type=str, help='Save best model to path')
     parser.add_argument('--output-dir', type=str, default='reports', help='Output directory for plots')
 
+    # Triple Barrier arguments
+    parser.add_argument('--triple-barrier', action='store_true',
+                        help='Use Triple Barrier labeling method for classification')
+    parser.add_argument('--tb-take-profit', type=float, default=None,
+                        help='Fixed take profit %% (e.g., 0.01 for 1%%). Default: use ATR')
+    parser.add_argument('--tb-stop-loss', type=float, default=None,
+                        help='Fixed stop loss %% (e.g., 0.005 for 0.5%%). Default: use ATR')
+    parser.add_argument('--tb-atr-tp', type=float, default=2.0,
+                        help='ATR multiplier for take profit (default: 2.0)')
+    parser.add_argument('--tb-atr-sl', type=float, default=1.0,
+                        help='ATR multiplier for stop loss (default: 1.0)')
+
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -823,11 +1325,21 @@ def main():
         print(f"Invalid target: {args.target}. Use one of: {list(target_map.keys())}")
         return
     target_horizon = target_map[args.target]
-    target_col = f'target_{target_horizon}m'
+
+    # Determine target column based on mode
+    if args.triple_barrier:
+        target_col = f'tb_label_{target_horizon}m'
+    else:
+        target_col = f'target_{target_horizon}m'
 
     print(f"\n{'='*60}")
     print(f"ML Analysis for {args.pair}")
-    print(f"Target: {args.target} forward return")
+    print(f"Target: {args.target} forward {'(Triple Barrier)' if args.triple_barrier else 'return'}")
+    if args.triple_barrier:
+        if args.tb_take_profit and args.tb_stop_loss:
+            print(f"Barriers: TP={args.tb_take_profit:.2%}, SL={args.tb_stop_loss:.2%}")
+        else:
+            print(f"Barriers: ATR-based (TP={args.tb_atr_tp}x, SL={args.tb_atr_sl}x)")
     print(f"{'='*60}\n")
 
     # Load data
@@ -857,7 +1369,15 @@ def main():
 
     # Create targets
     print("Creating targets...")
-    df = create_targets(df, horizons=[5, 15, 30, 60])
+    use_atr = args.tb_take_profit is None or args.tb_stop_loss is None
+    df = create_targets(
+        df,
+        horizons=[5, 15, 30, 60],
+        use_triple_barrier=args.triple_barrier,
+        tb_take_profit=args.tb_take_profit,
+        tb_stop_loss=args.tb_stop_loss,
+        tb_use_atr=use_atr,
+    )
 
     # Get feature columns
     feature_cols = get_feature_columns(df)
@@ -873,29 +1393,63 @@ def main():
 
     # Train models
     print("\n" + "="*60)
-    print("TRAINING MODELS")
+    if args.triple_barrier:
+        print("TRAINING CLASSIFICATION MODELS (Triple Barrier)")
+    else:
+        print("TRAINING REGRESSION MODELS")
     print("="*60)
 
-    results = train_models(df, target_col, feature_cols, n_splits=5)
+    if args.triple_barrier:
+        # Train classification models for triple barrier labels
+        clf_results = train_classification_models(df, target_col, feature_cols, n_splits=5)
 
-    if not results:
-        print("No models trained successfully")
-        return
+        if not clf_results:
+            print("No classification models trained successfully")
+            return
 
-    # Find best model
-    best_result = max(results, key=lambda r: np.mean(r.directional_accuracy))
-    print(f"\nBest model: {best_result.name}")
+        # Find best classifier
+        best_clf = max(clf_results, key=lambda r: np.mean(r.f1_scores))
+        print(f"\nBest classifier: {best_clf.name}")
 
-    # Print top features
-    if best_result.feature_importance:
-        print(f"\nTop 10 Features ({best_result.name}):")
-        sorted_features = sorted(
-            best_result.feature_importance.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:10]
-        for i, (feat, imp) in enumerate(sorted_features, 1):
-            print(f"  {i:2}. {feat:30} {imp:.4f}")
+        # Print top features
+        if best_clf.feature_importance:
+            print(f"\nTop 10 Features ({best_clf.name}):")
+            sorted_features = sorted(
+                best_clf.feature_importance.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:10]
+            for i, (feat, imp) in enumerate(sorted_features, 1):
+                print(f"  {i:2}. {feat:30} {imp:.4f}")
+
+        # Store for later use
+        best_result = best_clf
+        results = clf_results
+        is_classification = True
+    else:
+        # Train regression models
+        results = train_models(df, target_col, feature_cols, n_splits=5)
+
+        if not results:
+            print("No models trained successfully")
+            return
+
+        # Find best model
+        best_result = max(results, key=lambda r: np.mean(r.directional_accuracy))
+        print(f"\nBest model: {best_result.name}")
+
+        # Print top features
+        if best_result.feature_importance:
+            print(f"\nTop 10 Features ({best_result.name}):")
+            sorted_features = sorted(
+                best_result.feature_importance.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:10]
+            for i, (feat, imp) in enumerate(sorted_features, 1):
+                print(f"  {i:2}. {feat:30} {imp:.4f}")
+
+        is_classification = False
 
     # Backtest
     print("\n" + "="*60)
@@ -910,13 +1464,24 @@ def main():
 
     predictions = best_result.model.predict(X_clean)
 
-    backtest = backtest_strategy(
-        df_clean,
-        predictions,
-        price_col='last',
-        threshold=0.0001,
-        transaction_cost=0.001
-    )
+    if is_classification:
+        # Use triple barrier backtest
+        backtest = backtest_triple_barrier(
+            df_clean,
+            predictions,
+            price_col='last',
+            hold_periods=target_horizon,
+            transaction_cost=0.001
+        )
+    else:
+        # Use standard regression backtest
+        backtest = backtest_strategy(
+            df_clean,
+            predictions,
+            price_col='last',
+            threshold=0.0001,
+            transaction_cost=0.001
+        )
 
     print(f"\nBacktest Results ({best_result.name}):")
     print(f"  Total Return: {backtest.total_return:.2%}")
@@ -929,12 +1494,22 @@ def main():
     if args.save_model:
         model_path = Path(args.save_model)
         model_path.parent.mkdir(exist_ok=True, parents=True)
-        joblib.dump({
+        model_data = {
             'model': best_result.model,
             'feature_cols': feature_cols,
             'pair': args.pair,
-            'target': args.target
-        }, model_path)
+            'target': args.target,
+            'is_classification': is_classification,
+            'triple_barrier': args.triple_barrier,
+        }
+        if args.triple_barrier:
+            model_data['tb_config'] = {
+                'take_profit': args.tb_take_profit,
+                'stop_loss': args.tb_stop_loss,
+                'atr_tp_mult': args.tb_atr_tp,
+                'atr_sl_mult': args.tb_atr_sl,
+            }
+        joblib.dump(model_data, model_path)
         print(f"\nModel saved to {model_path}")
 
     # Plots
@@ -955,14 +1530,39 @@ def main():
             save_path=output_dir / f"{args.pair.replace('/', '_')}_backtest.png"
         )
 
-        # Predictions vs actual
-        y_actual = df_clean[target_col].values
-        plot_predictions_vs_actual(
-            y_actual,
-            predictions,
-            best_result.name,
-            save_path=output_dir / f"{args.pair.replace('/', '_')}_predictions.png"
-        )
+        # Predictions vs actual (only for regression)
+        if not is_classification:
+            y_actual = df_clean[target_col].values
+            plot_predictions_vs_actual(
+                y_actual,
+                predictions,
+                best_result.name,
+                save_path=output_dir / f"{args.pair.replace('/', '_')}_predictions.png"
+            )
+        else:
+            # For classification, plot confusion matrix
+            from sklearn.metrics import confusion_matrix
+            import matplotlib.pyplot as plt
+
+            y_actual = df_clean[target_col].values
+            mask = ~np.isnan(y_actual)
+            y_actual_clean = y_actual[mask].astype(int)
+            predictions_clean = predictions[mask]
+
+            cm = confusion_matrix(y_actual_clean, predictions_clean, labels=[-1, 0, 1])
+            fig, ax = plt.subplots(figsize=(8, 6))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=['Stop Loss', 'Expired', 'Take Profit'],
+                        yticklabels=['Stop Loss', 'Expired', 'Take Profit'],
+                        ax=ax)
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            ax.set_title(f'{best_result.name} - Confusion Matrix (Triple Barrier)')
+            plt.tight_layout()
+            save_path = output_dir / f"{args.pair.replace('/', '_')}_confusion_matrix.png"
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Saved confusion matrix to {save_path}")
+            plt.show()
 
     print("\n" + "="*60)
     print("ANALYSIS COMPLETE")
