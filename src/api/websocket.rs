@@ -1,6 +1,7 @@
 use crate::api::models::*;
 use crate::config::KrakenConfig;
 use crate::data::{Candle, CandleStore, OrderBookStore, Ticker, TickerStore};
+use crate::storage::{AiPaperTrade, AiSignal, TradeStats};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -29,6 +30,10 @@ pub enum MarketEvent {
     Connected,
     Disconnected,
     Error(String),
+    // AI Advisor events (from MongoDB)
+    AiSignalUpdate(AiSignal),
+    AiStatsUpdate(TradeStats),
+    AiTradesUpdate(Vec<AiPaperTrade>),
 }
 
 pub struct KrakenWebSocket {

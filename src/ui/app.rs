@@ -3,7 +3,7 @@
 use crate::api::{KrakenWebSocket, MarketEvent};
 use crate::config::Config;
 use crate::data::{Candle, OrderBook, Ticker};
-use crate::storage::{DataRecorder, Database, TradeRecord};
+use crate::storage::{DataRecorder, Database, MongoStore, TradeRecord};
 use crate::trading::order::Position;
 use crate::trading::TradingEngine;
 use crate::ui::dialogs::{ConfirmDialog, HelpOverlay, OrderDialog};
@@ -11,6 +11,7 @@ use crate::ui::input::{
     ConfirmAction, DialogType, InputMode, InputState, OrderDialogField, OrderDialogState, View,
 };
 use crate::ui::views::{HistoryView, PortfolioView, TradingView, ViewRenderer, ViewState};
+use crate::ui::widgets::ai_advisor::{AiRecentTrade, AiSignalData, AiTradeStats};
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -41,6 +42,10 @@ struct UiState {
     input: InputState,
     order_dialog: Option<OrderDialogState>,
     confirm_dialog: Option<(String, String, ConfirmAction, bool)>, // (title, message, action, selected_yes)
+    // AI Advisor data
+    ai_signal: Option<AiSignalData>,
+    ai_stats: Option<AiTradeStats>,
+    ai_recent_trades: Vec<AiRecentTrade>,
 }
 
 impl UiState {
@@ -58,6 +63,9 @@ impl UiState {
             input: InputState::new(),
             order_dialog: None,
             confirm_dialog: None,
+            ai_signal: None,
+            ai_stats: None,
+            ai_recent_trades: Vec::new(),
         }
     }
 }
@@ -87,6 +95,8 @@ pub struct App {
     timeframe_index: usize,
     timeframe_interval: Arc<std::sync::atomic::AtomicU32>,
     should_reconnect: Arc<std::sync::atomic::AtomicBool>,
+    // MongoDB for AI signals
+    mongo_store: Option<Arc<MongoStore>>,
 }
 
 impl App {
@@ -110,6 +120,18 @@ impl App {
             .position(|(i, _)| *i == initial_interval)
             .unwrap_or(0);
 
+        // Connect to MongoDB for AI signals (optional - continues if unavailable)
+        let mongo_store = match MongoStore::new_local().await {
+            Ok(store) => {
+                tracing::info!("Connected to MongoDB for AI signals");
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                tracing::warn!("MongoDB not available for AI signals: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
             config,
             engine: Arc::new(Mutex::new(engine)),
@@ -123,6 +145,7 @@ impl App {
             timeframe_index,
             timeframe_interval: Arc::new(std::sync::atomic::AtomicU32::new(initial_interval)),
             should_reconnect: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mongo_store,
         })
     }
 
@@ -218,6 +241,38 @@ impl App {
                 tracing::info!("Reconnecting to WebSocket...");
             }
         });
+
+        // Spawn MongoDB polling task for AI signals
+        if let Some(store) = self.mongo_store.clone() {
+            let mongo_event_tx = event_tx.clone();
+            let poll_pairs = self.all_pairs.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    // Poll latest signal for each pair
+                    for pair in &poll_pairs {
+                        if let Ok(Some(signal)) = store.get_latest_signal(pair).await {
+                            let _ = mongo_event_tx.send(MarketEvent::AiSignalUpdate(signal)).await;
+                        }
+                    }
+
+                    // Poll trade stats
+                    if let Ok(stats) = store.get_trade_stats().await {
+                        let _ = mongo_event_tx.send(MarketEvent::AiStatsUpdate(stats)).await;
+                    }
+
+                    // Poll open trades
+                    if let Ok(trades) = store.get_open_trades().await {
+                        let _ = mongo_event_tx.send(MarketEvent::AiTradesUpdate(trades)).await;
+                    }
+
+                    // Poll every 2 seconds
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            });
+
+            tracing::info!("MongoDB AI signal polling started");
+        }
 
         // Main loop
         let tick_rate = Duration::from_millis(self.config.ui.refresh_rate_ms);
@@ -745,6 +800,52 @@ impl App {
             MarketEvent::Error(err) => {
                 tracing::error!("Market error: {}", err);
             }
+            // AI Advisor events from MongoDB
+            MarketEvent::AiSignalUpdate(signal) => {
+                self.ui_state.ai_signal = Some(AiSignalData {
+                    signal: signal.signal.to_string(),
+                    confidence: signal.confidence,
+                    price: signal.indicators.price,
+                    rsi: signal.indicators.rsi,
+                    macd: signal.indicators.macd,
+                    macd_hist: signal.indicators.macd_hist,
+                    model_version: signal.model_version.clone(),
+                    last_update: signal.timestamp.format("%H:%M:%S").to_string(),
+                });
+            }
+            MarketEvent::AiStatsUpdate(stats) => {
+                self.ui_state.ai_stats = Some(AiTradeStats {
+                    total_trades: stats.total_trades,
+                    winning_trades: stats.winning_trades,
+                    losing_trades: stats.losing_trades,
+                    win_rate: stats.win_rate,
+                    total_pnl: stats.total_pnl,
+                    avg_pnl: stats.avg_pnl,
+                    open_positions: 0,
+                });
+            }
+            MarketEvent::AiTradesUpdate(trades) => {
+                self.ui_state.ai_recent_trades = trades
+                    .iter()
+                    .map(|t| AiRecentTrade {
+                        pair: t.pair.clone(),
+                        side: t.side.clone(),
+                        entry_price: t.entry_price,
+                        exit_price: t.exit_price,
+                        pnl: t.pnl,
+                        pnl_pct: t.pnl_pct,
+                        status: format!("{:?}", t.status),
+                    })
+                    .collect();
+
+                // Update open positions count
+                if let Some(ref mut stats) = self.ui_state.ai_stats {
+                    stats.open_positions = trades
+                        .iter()
+                        .filter(|t| t.status == crate::storage::TradeStatus::Open)
+                        .count();
+                }
+            }
         }
     }
 
@@ -767,6 +868,10 @@ impl App {
             selected_pair: self.selected_pair(),
             all_pairs: &self.all_pairs,
             timeframe: self.current_timeframe(),
+            // AI Advisor data
+            ai_signal: self.ui_state.ai_signal.as_ref(),
+            ai_stats: self.ui_state.ai_stats.as_ref(),
+            ai_recent_trades: &self.ui_state.ai_recent_trades,
         };
 
         // Render current view

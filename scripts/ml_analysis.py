@@ -237,6 +237,159 @@ def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     return tr.rolling(window=period).mean()
 
 
+def compute_stochastic(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+    smooth_k: int = 3,
+    smooth_d: int = 3
+) -> Tuple[pd.Series, pd.Series]:
+    """Compute Stochastic Oscillator (%K and %D).
+
+    Args:
+        high: High prices
+        low: Low prices
+        close: Close prices
+        period: Lookback period for high/low range
+        smooth_k: Smoothing period for %K
+        smooth_d: Smoothing period for %D (signal line)
+
+    Returns:
+        Tuple of (%K smoothed, %D signal line)
+    """
+    lowest_low = low.rolling(window=period).min()
+    highest_high = high.rolling(window=period).max()
+
+    # Raw %K
+    k = 100 * (close - lowest_low) / (highest_high - lowest_low)
+
+    # Smoothed %K
+    k_smooth = k.rolling(window=smooth_k).mean()
+
+    # %D (signal line)
+    d = k_smooth.rolling(window=smooth_d).mean()
+
+    return k_smooth, d
+
+
+def compute_mfi(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    period: int = 14
+) -> pd.Series:
+    """Compute Money Flow Index (volume-weighted RSI).
+
+    Args:
+        high: High prices
+        low: Low prices
+        close: Close prices
+        volume: Trading volume
+        period: Lookback period
+
+    Returns:
+        MFI values (0-100 scale)
+    """
+    # Typical price
+    typical_price = (high + low + close) / 3
+
+    # Money flow
+    money_flow = typical_price * volume
+
+    # Direction
+    delta = typical_price.diff()
+
+    # Positive and negative money flow
+    positive_flow = money_flow.where(delta > 0, 0).rolling(window=period).sum()
+    negative_flow = money_flow.where(delta < 0, 0).abs().rolling(window=period).sum()
+
+    # Money flow ratio and index
+    mfr = positive_flow / negative_flow
+    mfi = 100 - (100 / (1 + mfr))
+
+    return mfi
+
+
+def compute_adx(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """Compute Average Directional Index (ADX).
+
+    ADX measures trend STRENGTH (not direction):
+    - ADX < 20: Weak/no trend (good for mean reversion)
+    - ADX 20-40: Developing trend
+    - ADX > 40: Strong trend (good for trend following)
+
+    Args:
+        high: High prices
+        low: Low prices
+        close: Close prices
+        period: Lookback period (default 14)
+
+    Returns:
+        Tuple of (ADX, +DI, -DI)
+    """
+    # True Range
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Directional Movement
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+
+    # +DM and -DM
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
+
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    atr = tr.rolling(window=period).mean()
+    plus_dm_smooth = plus_dm.rolling(window=period).mean()
+    minus_dm_smooth = minus_dm.rolling(window=period).mean()
+
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window=period).mean()
+
+    return adx, plus_di, minus_di
+
+
+def compute_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """Compute On-Balance Volume (OBV).
+
+    OBV is a cumulative indicator that adds volume on up days
+    and subtracts volume on down days. It shows accumulation/distribution.
+
+    - Rising OBV with rising price = uptrend confirmed
+    - Falling OBV with rising price = potential reversal (distribution)
+    - Rising OBV with falling price = potential reversal (accumulation)
+
+    Args:
+        close: Close prices
+        volume: Trading volume
+
+    Returns:
+        OBV values (cumulative)
+    """
+    # Direction: +1 if price up, -1 if price down, 0 if unchanged
+    direction = np.sign(close.diff())
+
+    # OBV = cumulative sum of signed volume
+    obv = (direction * volume).cumsum()
+
+    return obv
+
+
 def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add technical indicator features to dataframe."""
     df = df.copy()
@@ -350,6 +503,230 @@ def add_spread_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_oscillator_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add oscillator and trend strength indicators.
+
+    Indicators added:
+    - Stochastic: Uses high/low range (RSI only uses close)
+    - MFI: Incorporates volume (volume-weighted RSI)
+    - ADX: Trend strength (not direction) - good for filtering
+    - OBV: On-Balance Volume for accumulation/distribution
+    """
+    df = df.copy()
+
+    price_col = 'close' if 'close' in df.columns else 'last'
+
+    # Need OHLC data for these indicators
+    if not all(col in df.columns for col in ['high', 'low']):
+        return df
+
+    high = df['high']
+    low = df['low']
+    close = df[price_col]
+
+    # Stochastic Oscillator
+    df['stoch_k'], df['stoch_d'] = compute_stochastic(high, low, close)
+    df['stoch_overbought'] = (df['stoch_k'] > 80).astype(int)
+    df['stoch_oversold'] = (df['stoch_k'] < 20).astype(int)
+    df['stoch_cross_up'] = ((df['stoch_k'] > df['stoch_d']) &
+                            (df['stoch_k'].shift(1) <= df['stoch_d'].shift(1))).astype(int)
+    df['stoch_cross_down'] = ((df['stoch_k'] < df['stoch_d']) &
+                              (df['stoch_k'].shift(1) >= df['stoch_d'].shift(1))).astype(int)
+
+    # ADX - Average Directional Index (trend strength)
+    df['adx'], df['plus_di'], df['minus_di'] = compute_adx(high, low, close)
+    df['adx_weak_trend'] = (df['adx'] < 20).astype(int)  # Good for mean reversion
+    df['adx_strong_trend'] = (df['adx'] > 40).astype(int)  # Good for trend following
+    df['di_cross_up'] = ((df['plus_di'] > df['minus_di']) &
+                         (df['plus_di'].shift(1) <= df['minus_di'].shift(1))).astype(int)
+    df['di_cross_down'] = ((df['plus_di'] < df['minus_di']) &
+                           (df['plus_di'].shift(1) >= df['minus_di'].shift(1))).astype(int)
+
+    # MFI - Money Flow Index (only if volume available)
+    if 'volume' in df.columns:
+        df['mfi'] = compute_mfi(high, low, close, df['volume'])
+        df['mfi_overbought'] = (df['mfi'] > 80).astype(int)
+        df['mfi_oversold'] = (df['mfi'] < 20).astype(int)
+
+        # OBV - On-Balance Volume
+        df['obv'] = compute_obv(close, df['volume'])
+        # OBV trend (is OBV rising or falling?)
+        df['obv_sma'] = df['obv'].rolling(window=20).mean()
+        df['obv_trend'] = (df['obv'] > df['obv_sma']).astype(int)  # 1 = accumulation
+        # OBV divergence signal (price down but OBV up = bullish divergence)
+        price_down = (close < close.shift(5)).astype(int)
+        obv_up = (df['obv'] > df['obv'].shift(5)).astype(int)
+        df['obv_bull_divergence'] = (price_down & obv_up).astype(int)
+
+    return df
+
+
+# =============================================================================
+# Multi-Timeframe Indicators
+# =============================================================================
+
+def resample_ohlc(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Resample OHLC data to a higher timeframe.
+
+    Args:
+        df: DataFrame with OHLC data (must have 'ts' or datetime index)
+        timeframe: Target timeframe ('5T', '15T', '1H')
+
+    Returns:
+        Resampled OHLC DataFrame
+    """
+    df = df.copy()
+
+    # Ensure datetime index
+    if 'ts' in df.columns:
+        df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+        df = df.set_index('datetime')
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        return pd.DataFrame()  # Can't resample without datetime
+
+    # Only keep OHLCV columns for resampling
+    ohlc_cols = ['open', 'high', 'low', 'close', 'volume']
+    available_cols = [c for c in ohlc_cols if c in df.columns]
+
+    if not available_cols:
+        return pd.DataFrame()
+
+    agg_dict = {}
+    if 'open' in df.columns:
+        agg_dict['open'] = 'first'
+    if 'high' in df.columns:
+        agg_dict['high'] = 'max'
+    if 'low' in df.columns:
+        agg_dict['low'] = 'min'
+    if 'close' in df.columns:
+        agg_dict['close'] = 'last'
+    if 'volume' in df.columns:
+        agg_dict['volume'] = 'sum'
+
+    # Resample OHLC
+    resampled = df[available_cols].resample(timeframe).agg(agg_dict).dropna()
+
+    return resampled
+
+
+def compute_indicators_for_timeframe(
+    df: pd.DataFrame,
+    timeframe_suffix: str
+) -> pd.DataFrame:
+    """Compute key indicators for a specific timeframe.
+
+    Focuses on low-NaN indicators to preserve training samples:
+    - 5m: RSI(14), EMA(20) - RSI causes ~17% NaN
+    - 15m: RSI(9), EMA(14), MACD - RSI causes ~25% NaN, MACD ~0%
+    - 1h: EMA(10) only - RSI would cause 60%+ NaN
+
+    Args:
+        df: OHLC DataFrame for this timeframe
+        timeframe_suffix: Suffix to add to column names ('_5m', '_15m', '_1h')
+
+    Returns:
+        DataFrame with indicator columns
+    """
+    result = pd.DataFrame(index=df.index)
+
+    if 'close' not in df.columns:
+        return result
+
+    close = df['close']
+
+    # EMA periods for each timeframe
+    if timeframe_suffix == '_1h':
+        ema_period = 10
+    elif timeframe_suffix == '_15m':
+        ema_period = 14
+    else:  # 5m
+        ema_period = 20
+
+    # EMA (all timeframes - causes 0% NaN)
+    result[f'ema{timeframe_suffix}'] = close.ewm(span=ema_period, adjust=False).mean()
+    result[f'price_vs_ema{timeframe_suffix}'] = close / result[f'ema{timeframe_suffix}'] - 1
+
+    # RSI only for 5m and 15m (1h RSI causes 60%+ NaN)
+    if timeframe_suffix in ['_5m', '_15m']:
+        rsi_period = 14 if timeframe_suffix == '_5m' else 9
+        result[f'rsi{timeframe_suffix}'] = compute_rsi(close, rsi_period)
+
+    # MACD only for 15m (causes 0% NaN, very useful indicator)
+    if timeframe_suffix == '_15m':
+        macd, signal, hist = compute_macd(close)
+        result[f'macd{timeframe_suffix}'] = macd
+        result[f'macd_signal{timeframe_suffix}'] = signal
+        result[f'macd_hist{timeframe_suffix}'] = hist
+
+    return result
+
+
+def add_multi_timeframe_features(
+    df: pd.DataFrame,
+    ohlc_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Add multi-timeframe indicator features.
+
+    Resamples 1-minute OHLC data to 5m, 15m, and 1h timeframes,
+    calculates indicators for each, and merges back to 1-min data.
+
+    Args:
+        df: Main DataFrame (1-min data)
+        ohlc_df: Raw OHLC DataFrame (1-min)
+
+    Returns:
+        DataFrame with multi-timeframe features added
+    """
+    if ohlc_df is None or ohlc_df.empty:
+        return df
+
+    df = df.copy()
+
+    # Ensure datetime for merging
+    if 'datetime' not in df.columns and 'ts' in df.columns:
+        df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+
+    if 'datetime' not in df.columns:
+        return df
+
+    timeframes = [
+        ('5T', '_5m'),    # 5 minutes
+        ('15T', '_15m'),  # 15 minutes
+        ('1H', '_1h'),    # 1 hour
+    ]
+
+    for tf_code, tf_suffix in timeframes:
+        # Resample OHLC to this timeframe
+        tf_ohlc = resample_ohlc(ohlc_df, tf_code)
+
+        if len(tf_ohlc) < 20:  # Need minimum data for indicators
+            continue
+
+        # Compute indicators for this timeframe
+        tf_indicators = compute_indicators_for_timeframe(tf_ohlc, tf_suffix)
+
+        if tf_indicators.empty:
+            continue
+
+        # Reset index for merge
+        tf_indicators = tf_indicators.reset_index()
+        tf_indicators = tf_indicators.rename(columns={'datetime': 'tf_datetime', 'index': 'tf_datetime'})
+
+        # Merge back to 1-min data using backward direction (no look-ahead bias)
+        df = pd.merge_asof(
+            df.sort_values('datetime'),
+            tf_indicators.sort_values('tf_datetime'),
+            left_on='datetime',
+            right_on='tf_datetime',
+            direction='backward'
+        )
+
+        # Drop the temporary timeframe datetime column
+        df = df.drop(columns=['tf_datetime'], errors='ignore')
+
+    return df
+
+
 def add_book_features(ticker_df: pd.DataFrame, book_df: pd.DataFrame) -> pd.DataFrame:
     """Add order book features by merging with ticker data."""
     if book_df.empty:
@@ -412,8 +789,24 @@ def create_features(
     # Add OHLC features if available
     if ohlc_df is not None and not ohlc_df.empty:
         # Merge OHLC on nearest timestamp
-        ohlc_cols = ['ts', 'open', 'high', 'low', 'close', 'trades']
+        ohlc_cols = ['ts', 'open', 'high', 'low', 'close', 'volume', 'trades']
+        ohlc_cols = [c for c in ohlc_cols if c in ohlc_df.columns]
         ohlc_subset = ohlc_df[ohlc_cols].copy()
+
+        # Rename to avoid conflicts with ticker columns
+        rename_map = {
+            'high': 'high',
+            'low': 'low',
+            'open': 'open',
+            'close': 'close',
+            'volume': 'ohlc_volume',
+        }
+        # Only rename if column exists and would conflict
+        for old, new in list(rename_map.items()):
+            if old in df.columns and old in ohlc_subset.columns:
+                # Drop the ticker version, we want OHLC data
+                df = df.drop(columns=[old], errors='ignore')
+
         df = pd.merge_asof(
             df.sort_values('ts'),
             ohlc_subset.sort_values('ts'),
@@ -437,6 +830,260 @@ def create_features(
 
     # Add spread features
     df = add_spread_features(df)
+
+    # Add oscillator features (Stochastic, MFI, ADX, OBV)
+    df = add_oscillator_features(df)
+
+    # Add multi-timeframe features (5m, 15m, 1h indicators)
+    if ohlc_df is not None and not ohlc_df.empty:
+        df = add_multi_timeframe_features(df, ohlc_df)
+
+    return df
+
+
+# =============================================================================
+# Retracement Strategy (Drop & Recovery)
+# =============================================================================
+
+def detect_large_drops(
+    df: pd.DataFrame,
+    drop_threshold: float = 0.01,
+    lookback: int = 1,
+) -> pd.DataFrame:
+    """
+    Detect large price drops (red candles).
+
+    Args:
+        df: DataFrame with price data
+        drop_threshold: Minimum drop to consider (0.01 = 1%)
+        lookback: Number of periods to measure drop over
+
+    Returns:
+        DataFrame with drop detection columns added
+    """
+    df = df.copy()
+
+    price_col = 'close' if 'close' in df.columns else 'last'
+    prices = df[price_col]
+
+    # Calculate returns over lookback period
+    df['drop_pct'] = (prices / prices.shift(lookback) - 1)
+
+    # Detect large drops (negative returns exceeding threshold)
+    df['is_large_drop'] = (df['drop_pct'] < -drop_threshold).astype(int)
+
+    # Drop magnitude (absolute value, only for drops)
+    df['drop_magnitude'] = np.where(
+        df['drop_pct'] < 0,
+        -df['drop_pct'],
+        0
+    )
+
+    # Price at drop start and end
+    df['drop_start_price'] = prices.shift(lookback)
+    df['drop_end_price'] = prices
+
+    # 50% retracement target
+    df['retracement_target'] = df['drop_end_price'] + (df['drop_start_price'] - df['drop_end_price']) * 0.5
+
+    return df
+
+
+def retracement_labels(
+    df: pd.DataFrame,
+    drop_threshold: float = 0.01,
+    max_horizon: int = 30,
+    retracement_pct: float = 0.5,
+    stop_loss_mult: float = 1.0,
+) -> pd.Series:
+    """
+    Create labels for the retracement strategy.
+
+    After a large drop, check if price retraces to target before:
+    1. Hitting stop loss (drop continues by stop_loss_mult * original drop)
+    2. Time expires (max_horizon periods)
+
+    Labels:
+        1 = Successful retracement (price hit 50% target)
+       -1 = Failed (hit stop loss or dropped further)
+        0 = Expired without hitting either / No trade signal
+
+    Args:
+        df: DataFrame with price data (must have detect_large_drops applied)
+        drop_threshold: Minimum drop to trigger signal
+        max_horizon: Max periods to wait for retracement
+        retracement_pct: Target retracement (0.5 = 50%)
+        stop_loss_mult: Stop loss as multiple of original drop
+
+    Returns:
+        Series with labels
+    """
+    price_col = 'close' if 'close' in df.columns else 'last'
+    prices = df[price_col].values
+    n = len(prices)
+
+    # Ensure drop detection columns exist
+    if 'is_large_drop' not in df.columns:
+        df = detect_large_drops(df, drop_threshold)
+
+    is_drop = df['is_large_drop'].values
+    drop_magnitude = df['drop_magnitude'].values
+    drop_end_price = df['drop_end_price'].values if 'drop_end_price' in df.columns else prices
+    drop_start_price = df['drop_start_price'].values if 'drop_start_price' in df.columns else prices
+
+    labels = np.zeros(n)
+    labels[:] = np.nan
+
+    for i in range(n - max_horizon):
+        # Only create label if there was a large drop
+        if is_drop[i] != 1:
+            labels[i] = 0  # No trade signal
+            continue
+
+        entry_price = prices[i]
+        drop_size = drop_magnitude[i]
+
+        if drop_size <= 0 or np.isnan(drop_size):
+            labels[i] = 0
+            continue
+
+        # Calculate targets
+        # Retracement target: recover retracement_pct of the drop
+        retracement_target = entry_price * (1 + drop_size * retracement_pct)
+
+        # Stop loss: drop continues by stop_loss_mult * original drop
+        stop_loss_price = entry_price * (1 - drop_size * stop_loss_mult)
+
+        label = 0  # Default: expired
+
+        for j in range(1, max_horizon + 1):
+            if i + j >= n:
+                break
+
+            current_price = prices[i + j]
+
+            if np.isnan(current_price):
+                continue
+
+            # Check retracement target (win)
+            if current_price >= retracement_target:
+                label = 1
+                break
+
+            # Check stop loss (loss)
+            if current_price <= stop_loss_price:
+                label = -1
+                break
+
+        labels[i] = label
+
+    return pd.Series(labels, index=df.index, name='retracement_label')
+
+
+def analyze_retracement_stats(
+    df: pd.DataFrame,
+    drop_thresholds: List[float] = [0.005, 0.01, 0.015, 0.02, 0.03],
+    max_horizon: int = 30,
+) -> pd.DataFrame:
+    """
+    Analyze retracement statistics for different drop thresholds.
+
+    Returns DataFrame with stats for each threshold:
+    - Number of signals
+    - Win rate (successful retracements)
+    - Average time to retracement
+    - Average drop magnitude
+    """
+    results = []
+
+    for threshold in drop_thresholds:
+        df_temp = detect_large_drops(df.copy(), drop_threshold=threshold)
+        labels = retracement_labels(df_temp, drop_threshold=threshold, max_horizon=max_horizon)
+
+        df_temp['label'] = labels
+
+        # Only consider rows where there was a signal
+        signals = df_temp[df_temp['is_large_drop'] == 1]
+
+        if len(signals) == 0:
+            continue
+
+        n_signals = len(signals)
+        n_wins = (signals['label'] == 1).sum()
+        n_losses = (signals['label'] == -1).sum()
+        n_expired = (signals['label'] == 0).sum()
+
+        win_rate = n_wins / n_signals if n_signals > 0 else 0
+        avg_drop = signals['drop_magnitude'].mean()
+
+        results.append({
+            'drop_threshold': f"{threshold:.1%}",
+            'n_signals': n_signals,
+            'n_wins': n_wins,
+            'n_losses': n_losses,
+            'n_expired': n_expired,
+            'win_rate': f"{win_rate:.1%}",
+            'avg_drop': f"{avg_drop:.2%}",
+        })
+
+    return pd.DataFrame(results)
+
+
+def add_retracement_features(df: pd.DataFrame, drop_threshold: float = 0.01) -> pd.DataFrame:
+    """
+    Add features related to the retracement strategy.
+
+    Features added:
+    - Recent drop patterns
+    - Volatility context
+    - Volume during drop
+    - Distance from support levels
+    """
+    df = df.copy()
+
+    price_col = 'close' if 'close' in df.columns else 'last'
+    prices = df[price_col]
+
+    # Drop detection
+    df = detect_large_drops(df, drop_threshold=drop_threshold)
+
+    # Rolling drop statistics
+    df['drops_last_10'] = df['is_large_drop'].rolling(10).sum()
+    df['drops_last_30'] = df['is_large_drop'].rolling(30).sum()
+
+    # Average drop magnitude recently
+    df['avg_drop_magnitude_10'] = df['drop_magnitude'].rolling(10).mean()
+
+    # Consecutive drops
+    df['consecutive_red'] = (df['drop_pct'] < 0).astype(int)
+    df['consecutive_red_count'] = df['consecutive_red'].groupby(
+        (df['consecutive_red'] != df['consecutive_red'].shift()).cumsum()
+    ).cumcount() + 1
+    df['consecutive_red_count'] = np.where(df['consecutive_red'] == 1, df['consecutive_red_count'], 0)
+
+    # Distance from recent high (potential support)
+    df['distance_from_high_10'] = prices / prices.rolling(10).max() - 1
+    df['distance_from_high_20'] = prices / prices.rolling(20).max() - 1
+
+    # Distance from recent low
+    df['distance_from_low_10'] = prices / prices.rolling(10).min() - 1
+    df['distance_from_low_20'] = prices / prices.rolling(20).min() - 1
+
+    # Volatility at drop
+    df['volatility_at_drop'] = prices.pct_change().rolling(10).std()
+
+    # Volume spike (if volume available)
+    if 'volume' in df.columns:
+        df['volume_vs_avg'] = df['volume'] / df['volume'].rolling(20).mean()
+        df['volume_spike_at_drop'] = df['volume_vs_avg'] * df['is_large_drop']
+
+    # RSI at drop (oversold condition)
+    if 'rsi' in df.columns:
+        df['rsi_at_drop'] = df['rsi'] * df['is_large_drop']
+        df['is_oversold_drop'] = ((df['rsi'] < 30) & (df['is_large_drop'] == 1)).astype(int)
+
+    # Cleanup
+    df = df.drop(columns=['consecutive_red'], errors='ignore')
 
     return df
 
@@ -872,11 +1519,12 @@ def train_classification_models(
     X = X[mask]
     y_original = y[mask].astype(int)
 
-    # Remap labels from (-1, 0, 1) to (0, 1, 2) for XGBoost compatibility
-    # -1 (stop loss) -> 0, 0 (expired) -> 1, 1 (take profit) -> 2
-    label_map = {-1: 0, 0: 1, 1: 2}
-    reverse_label_map = {0: -1, 1: 0, 2: 1}
-    y = np.array([label_map.get(label, label) for label in y_original])
+    # Remap labels to sequential integers starting from 0 for XGBoost compatibility
+    # This handles cases where not all classes are present after NaN filtering
+    unique_labels = sorted(np.unique(y_original))
+    label_map = {orig: idx for idx, orig in enumerate(unique_labels)}
+    reverse_label_map = {idx: orig for orig, idx in label_map.items()}
+    y = np.array([label_map[label] for label in y_original])
 
     if len(X) < 100:
         print(f"Warning: Only {len(X)} samples available for training")
@@ -1165,6 +1813,155 @@ def backtest_strategy(
     )
 
 
+def backtest_retracement(
+    df: pd.DataFrame,
+    predictions: np.ndarray,
+    drop_threshold: float = 0.005,
+    retracement_pct: float = 0.5,
+    stop_loss_mult: float = 1.0,
+    max_hold: int = 30,
+    transaction_cost: float = 0.0026,  # Kraken taker fee
+    price_col: str = 'last',
+) -> BacktestResult:
+    """
+    Backtest the retracement strategy.
+
+    Only enters when:
+    1. There was a large drop (is_large_drop == 1)
+    2. Model predicts successful retracement (prediction == 1)
+
+    Exit when:
+    - Price hits retracement target (take profit)
+    - Price hits stop loss
+    - Max hold periods reached
+
+    Args:
+        df: DataFrame with price data and drop detection columns
+        predictions: Model predictions (1=enter, 0/-1=skip)
+        drop_threshold: Minimum drop to trigger signal
+        retracement_pct: Target retracement (0.5 = 50%)
+        stop_loss_mult: Stop loss as multiple of original drop
+        max_hold: Maximum periods to hold position
+        transaction_cost: Cost per trade (entry + exit)
+        price_col: Price column name
+
+    Returns:
+        BacktestResult with equity curve and metrics
+    """
+    # Ensure drop detection columns exist
+    if 'is_large_drop' not in df.columns:
+        df = detect_large_drops(df, drop_threshold=drop_threshold)
+
+    prices = df[price_col].values
+    is_drop = df['is_large_drop'].values
+    drop_magnitude = df['drop_magnitude'].values
+
+    n = len(prices)
+    predictions = predictions[:n]
+
+    equity = [1.0]
+    returns_list = []
+    trades = []
+    n_trades = 0
+    wins = 0
+
+    i = 0
+    while i < n - max_hold:
+        # Check if we should enter: large drop AND model predicts success
+        if is_drop[i] == 1 and predictions[i] == 1:
+            entry_price = prices[i]
+            drop_size = drop_magnitude[i]
+
+            if drop_size <= 0 or np.isnan(drop_size):
+                i += 1
+                continue
+
+            # Calculate targets
+            take_profit = entry_price * (1 + drop_size * retracement_pct)
+            stop_loss = entry_price * (1 - drop_size * stop_loss_mult)
+
+            # Simulate trade
+            exit_price = None
+            exit_reason = 'expired'
+
+            for j in range(1, max_hold + 1):
+                if i + j >= n:
+                    break
+
+                current_price = prices[i + j]
+
+                if current_price >= take_profit:
+                    exit_price = take_profit
+                    exit_reason = 'take_profit'
+                    break
+                elif current_price <= stop_loss:
+                    exit_price = stop_loss
+                    exit_reason = 'stop_loss'
+                    break
+
+            # If no exit, use last price
+            if exit_price is None:
+                exit_price = prices[min(i + max_hold, n - 1)]
+
+            # Calculate return
+            trade_return = (exit_price - entry_price) / entry_price
+            trade_return -= transaction_cost * 2  # Entry + exit
+
+            equity.append(equity[-1] * (1 + trade_return))
+            returns_list.append(trade_return)
+
+            n_trades += 1
+            if trade_return > 0:
+                wins += 1
+
+            trades.append({
+                'entry_idx': i,
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'return': trade_return,
+                'reason': exit_reason,
+                'drop_size': drop_size,
+            })
+
+            # Skip ahead after trade
+            i += max_hold
+        else:
+            i += 1
+
+    # Pad equity curve
+    while len(equity) < n:
+        equity.append(equity[-1])
+
+    equity_series = pd.Series(equity[:n], index=df.index[:n])
+    returns_series = pd.Series(returns_list) if returns_list else pd.Series([0])
+
+    # Metrics
+    total_return = equity[-1] - 1
+
+    if len(returns_list) > 0 and np.std(returns_list) > 0:
+        sharpe = np.mean(returns_list) / np.std(returns_list) * np.sqrt(252 * 24)
+    else:
+        sharpe = 0
+
+    # Max drawdown
+    equity_arr = np.array(equity)
+    peak = np.maximum.accumulate(equity_arr)
+    drawdown = (peak - equity_arr) / peak
+    max_dd = np.max(drawdown) if len(drawdown) > 0 else 0
+
+    win_rate = wins / n_trades if n_trades > 0 else 0
+
+    return BacktestResult(
+        equity_curve=equity_series,
+        returns=returns_series,
+        total_return=total_return,
+        sharpe_ratio=sharpe,
+        max_drawdown=max_dd,
+        win_rate=win_rate,
+        n_trades=n_trades
+    )
+
+
 # =============================================================================
 # Visualization
 # =============================================================================
@@ -1299,6 +2096,7 @@ def get_feature_columns(df: pd.DataFrame) -> List[str]:
     """Get list of feature columns (exclude targets and metadata)."""
     exclude_patterns = [
         'target_', 'direction_', 'tb_label_', 'tb_binary_',
+        'retracement_label',  # Exclude to avoid data leakage
         'datetime', 'ts', 'pair', 'bids', 'asks', '_json'
     ]
 
@@ -1333,6 +2131,18 @@ def main():
     parser.add_argument('--tb-atr-sl', type=float, default=1.0,
                         help='ATR multiplier for stop loss (default: 1.0)')
 
+    # Retracement Strategy arguments
+    parser.add_argument('--retracement', action='store_true',
+                        help='Use Retracement strategy (buy after large drops)')
+    parser.add_argument('--drop-threshold', type=float, default=0.005,
+                        help='Minimum drop to trigger signal (0.005 = 0.5%%)')
+    parser.add_argument('--retracement-pct', type=float, default=0.5,
+                        help='Target retracement percentage (0.5 = 50%%)')
+    parser.add_argument('--max-hold', type=int, default=30,
+                        help='Maximum periods to hold position (default: 30)')
+    parser.add_argument('--analyze-drops', action='store_true',
+                        help='Show drop analysis statistics before training')
+
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -1346,20 +2156,34 @@ def main():
         return
     target_horizon = target_map[args.target]
 
-    # Determine target column based on mode
-    if args.triple_barrier:
+    # Determine target column and mode
+    if args.retracement:
+        target_col = 'retracement_label'
+        strategy_mode = 'retracement'
+    elif args.triple_barrier:
         target_col = f'tb_label_{target_horizon}m'
+        strategy_mode = 'triple_barrier'
     else:
         target_col = f'target_{target_horizon}m'
+        strategy_mode = 'regression'
 
     print(f"\n{'='*60}")
     print(f"ML Analysis for {args.pair}")
-    print(f"Target: {args.target} forward {'(Triple Barrier)' if args.triple_barrier else 'return'}")
-    if args.triple_barrier:
+
+    if args.retracement:
+        print(f"Strategy: RETRACEMENT (Drop & Recovery)")
+        print(f"Drop threshold: {args.drop_threshold:.2%}")
+        print(f"Retracement target: {args.retracement_pct:.0%}")
+        print(f"Max hold: {args.max_hold} periods")
+    elif args.triple_barrier:
+        print(f"Target: {args.target} forward (Triple Barrier)")
         if args.tb_take_profit and args.tb_stop_loss:
             print(f"Barriers: TP={args.tb_take_profit:.2%}, SL={args.tb_stop_loss:.2%}")
         else:
             print(f"Barriers: ATR-based (TP={args.tb_atr_tp}x, SL={args.tb_atr_sl}x)")
+    else:
+        print(f"Target: {args.target} forward return")
+
     print(f"{'='*60}\n")
 
     # Load data
@@ -1387,17 +2211,55 @@ def main():
     print("\nCreating features...")
     df = create_features(ticker_df, ohlc_df, book_df)
 
-    # Create targets
+    # Create targets based on strategy mode
     print("Creating targets...")
-    use_atr = args.tb_take_profit is None or args.tb_stop_loss is None
-    df = create_targets(
-        df,
-        horizons=[5, 15, 30, 60],
-        use_triple_barrier=args.triple_barrier,
-        tb_take_profit=args.tb_take_profit,
-        tb_stop_loss=args.tb_stop_loss,
-        tb_use_atr=use_atr,
-    )
+
+    if args.retracement:
+        # Add retracement-specific features
+        df = add_retracement_features(df, drop_threshold=args.drop_threshold)
+
+        # Show drop analysis if requested
+        if args.analyze_drops:
+            print("\n" + "="*60)
+            print("DROP ANALYSIS")
+            print("="*60)
+            stats = analyze_retracement_stats(
+                df,
+                drop_thresholds=[0.001, 0.002, 0.003, 0.005, 0.01, 0.02],
+                max_horizon=args.max_hold
+            )
+            print(stats.to_string(index=False))
+            print()
+
+        # Create retracement labels
+        df['retracement_label'] = retracement_labels(
+            df,
+            drop_threshold=args.drop_threshold,
+            max_horizon=args.max_hold,
+            retracement_pct=args.retracement_pct,
+        )
+
+        # Show label distribution
+        signals = df[df['is_large_drop'] == 1]
+        if len(signals) > 0:
+            print(f"\nRetracement signals found: {len(signals)}")
+            wins = (signals['retracement_label'] == 1).sum()
+            losses = (signals['retracement_label'] == -1).sum()
+            expired = (signals['retracement_label'] == 0).sum()
+            print(f"  ✅ Successful retracements: {wins} ({wins/len(signals)*100:.1f}%)")
+            print(f"  ❌ Stop loss hit: {losses} ({losses/len(signals)*100:.1f}%)")
+            print(f"  ⏱️  Expired: {expired} ({expired/len(signals)*100:.1f}%)")
+    else:
+        # Standard targets (regression or triple barrier)
+        use_atr = args.tb_take_profit is None or args.tb_stop_loss is None
+        df = create_targets(
+            df,
+            horizons=[5, 15, 30, 60],
+            use_triple_barrier=args.triple_barrier,
+            tb_take_profit=args.tb_take_profit,
+            tb_stop_loss=args.tb_stop_loss,
+            tb_use_atr=use_atr,
+        )
 
     # Get feature columns
     feature_cols = get_feature_columns(df)
@@ -1413,14 +2275,16 @@ def main():
 
     # Train models
     print("\n" + "="*60)
-    if args.triple_barrier:
+    if args.retracement:
+        print("TRAINING CLASSIFICATION MODELS (Retracement Strategy)")
+    elif args.triple_barrier:
         print("TRAINING CLASSIFICATION MODELS (Triple Barrier)")
     else:
         print("TRAINING REGRESSION MODELS")
     print("="*60)
 
-    if args.triple_barrier:
-        # Train classification models for triple barrier labels
+    if args.retracement or args.triple_barrier:
+        # Train classification models
         clf_results = train_classification_models(df, target_col, feature_cols, n_splits=5)
 
         if not clf_results:
@@ -1485,14 +2349,27 @@ def main():
     predictions = best_result.model.predict(X_clean)
 
     if is_classification:
-        # Use triple barrier backtest
-        backtest = backtest_triple_barrier(
-            df_clean,
-            predictions,
-            price_col='last',
-            hold_periods=target_horizon,
-            transaction_cost=0.001
-        )
+        if args.retracement:
+            # Use retracement backtest
+            backtest = backtest_retracement(
+                df_clean,
+                predictions,
+                drop_threshold=args.drop_threshold,
+                retracement_pct=args.retracement_pct,
+                stop_loss_mult=1.0,
+                max_hold=args.max_hold,
+                transaction_cost=0.0026,  # Kraken taker fee
+                price_col='last',
+            )
+        else:
+            # Use triple barrier backtest
+            backtest = backtest_triple_barrier(
+                df_clean,
+                predictions,
+                price_col='last',
+                hold_periods=target_horizon,
+                transaction_cost=0.001
+            )
     else:
         # Use standard regression backtest
         backtest = backtest_strategy(
@@ -1528,6 +2405,13 @@ def main():
                 'stop_loss': args.tb_stop_loss,
                 'atr_tp_mult': args.tb_atr_tp,
                 'atr_sl_mult': args.tb_atr_sl,
+            }
+        if args.retracement:
+            model_data['retracement'] = True
+            model_data['retracement_config'] = {
+                'drop_threshold': args.drop_threshold,
+                'retracement_pct': args.retracement_pct,
+                'max_hold': args.max_hold,
             }
         joblib.dump(model_data, model_path)
         print(f"\nModel saved to {model_path}")
@@ -1571,13 +2455,22 @@ def main():
 
             cm = confusion_matrix(y_actual_clean, predictions_clean, labels=[-1, 0, 1])
             fig, ax = plt.subplots(figsize=(8, 6))
+
+            # Different labels for retracement vs triple barrier
+            if args.retracement:
+                labels = ['Stop Loss', 'Expired', 'Retracement']
+                title_suffix = 'Retracement Strategy'
+            else:
+                labels = ['Stop Loss', 'Expired', 'Take Profit']
+                title_suffix = 'Triple Barrier'
+
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                        xticklabels=['Stop Loss', 'Expired', 'Take Profit'],
-                        yticklabels=['Stop Loss', 'Expired', 'Take Profit'],
+                        xticklabels=labels,
+                        yticklabels=labels,
                         ax=ax)
             ax.set_xlabel('Predicted')
             ax.set_ylabel('Actual')
-            ax.set_title(f'{best_result.name} - Confusion Matrix (Triple Barrier)')
+            ax.set_title(f'{best_result.name} - Confusion Matrix ({title_suffix})')
             plt.tight_layout()
             save_path = output_dir / f"{args.pair.replace('/', '_')}_confusion_matrix.png"
             plt.savefig(save_path, dpi=150, bbox_inches='tight')

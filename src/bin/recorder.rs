@@ -190,6 +190,10 @@ async fn main() -> Result<()> {
                         MarketEvent::Error(err) => {
                             error!("Market error: {}", err);
                         }
+                        // AI events not relevant for recorder
+                        MarketEvent::AiSignalUpdate(_) |
+                        MarketEvent::AiStatsUpdate(_) |
+                        MarketEvent::AiTradesUpdate(_) => {}
                     }
                 }
             }

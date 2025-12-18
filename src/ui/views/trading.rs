@@ -1,8 +1,11 @@
-//! Trading view - main trading interface with chart, orderbook, positions
+//! Trading view - main trading interface with chart, orderbook, positions, AI advisor
 
 use super::{ViewRenderer, ViewState};
 use crate::ui::charts::PriceChart;
-use crate::ui::widgets::{orderbook::OrderBookWidget, positions::PositionsWidget, status::StatusWidget};
+use crate::ui::widgets::{
+    ai_advisor::AiAdvisorWidget, orderbook::OrderBookWidget, positions::PositionsWidget,
+    status::StatusWidget,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     Frame,
@@ -30,8 +33,8 @@ impl ViewRenderer for TradingView {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(4),      // Status bar
-                Constraint::Percentage(50), // Chart (full width)
-                Constraint::Min(10),        // Order book + Positions
+                Constraint::Percentage(45), // Chart (full width)
+                Constraint::Min(12),        // Order book + Positions + AI
             ])
             .split(area);
 
@@ -41,14 +44,19 @@ impl ViewRenderer for TradingView {
         // Render chart (full width)
         render_chart(f, main_chunks[1], state);
 
-        // Bottom row: order book + positions side by side
+        // Bottom row: order book + positions + AI advisor
         let bottom_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Percentage(35), // Order book
+                Constraint::Percentage(35), // Positions
+                Constraint::Percentage(30), // AI Advisor
+            ])
             .split(main_chunks[2]);
 
         render_orderbook(f, bottom_chunks[0], state);
         render_positions(f, bottom_chunks[1], state);
+        render_ai_advisor(f, bottom_chunks[2], state);
     }
 }
 
@@ -90,5 +98,11 @@ fn render_orderbook(f: &mut Frame, area: Rect, state: &ViewState) {
 fn render_positions(f: &mut Frame, area: Rect, state: &ViewState) {
     let positions: Vec<&_> = state.positions.iter().collect();
     let widget = PositionsWidget::new(positions);
+    f.render_widget(widget, area);
+}
+
+fn render_ai_advisor(f: &mut Frame, area: Rect, state: &ViewState) {
+    let recent_trades: Vec<&_> = state.ai_recent_trades.iter().collect();
+    let widget = AiAdvisorWidget::new(state.ai_signal, state.ai_stats, recent_trades);
     f.render_widget(widget, area);
 }

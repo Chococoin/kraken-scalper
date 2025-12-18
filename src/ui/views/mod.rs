@@ -13,6 +13,7 @@ pub use trading::TradingView;
 use crate::data::{Candle, OrderBook, Ticker};
 use crate::storage::TradeRecord;
 use crate::trading::order::Position;
+use crate::ui::widgets::ai_advisor::{AiRecentTrade, AiSignalData, AiTradeStats};
 use ratatui::{layout::Rect, Frame};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -33,6 +34,10 @@ pub struct ViewState<'a> {
     pub selected_pair: &'a str,
     pub all_pairs: &'a [String],
     pub timeframe: &'a str,
+    // AI Advisor data
+    pub ai_signal: Option<&'a AiSignalData>,
+    pub ai_stats: Option<&'a AiTradeStats>,
+    pub ai_recent_trades: &'a [AiRecentTrade],
 }
 
 /// Trait for renderable views

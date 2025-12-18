@@ -28,3 +28,4 @@ Thumbs.db
 scalper.db-shm
 scalper.db-wal
 scalper.log
+scripts/__pycache__/
