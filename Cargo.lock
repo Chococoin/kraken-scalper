@@ -2657,6 +2657,7 @@ dependencies = [
  "clap",
  "config",
  "crossterm",
+ "dotenvy",
  "futures-util",
  "hmac",
  "parquet",
