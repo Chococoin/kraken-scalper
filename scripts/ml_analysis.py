@@ -993,6 +993,18 @@ def train_classification_models(
     return results
 
 
+@dataclass
+class BacktestResult:
+    """Results from backtesting a strategy."""
+    equity_curve: pd.Series
+    returns: pd.Series
+    total_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    win_rate: float
+    n_trades: int
+
+
 def backtest_triple_barrier(
     df: pd.DataFrame,
     predictions: np.ndarray,
