@@ -17,6 +17,9 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present
+    let _ = dotenvy::dotenv();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
