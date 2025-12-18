@@ -1,21 +1,18 @@
-# fly.toml app configuration file for scalper recorder daemon
-# See https://fly.io/docs/reference/configuration/
+# fly.toml app configuration file generated for scalper-green-dawn-1262 on 2025-12-18T13:09:24+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = 'scalper-dawn-frost-6201'
+app = 'scalper-green-dawn-1262'
 primary_region = 'fra'
 
 [build]
 
-# No HTTP service - this is a worker/daemon process
-[processes]
-  app = "/app/recorder"
+# No http_service - this is a background daemon, not a web service
+# The recorder runs continuously without needing HTTP traffic
 
 [[vm]]
-  memory = '512mb'
+  memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-
-# Mount persistent storage for parquet files
-[mounts]
-  source = "data"
-  destination = "/app/data"
+  memory_mb = 1024

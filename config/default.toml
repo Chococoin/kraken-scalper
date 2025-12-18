@@ -21,9 +21,25 @@ crypto_pairs = [
 ]
 
 # Stock pairs to monitor (xStocks - tokenized stocks)
+# 27 xStocks confirmed working via WebSocket test (2025-12-18)
 stock_pairs = [
-    "TSLAx/USD", "NVDAx/USD", "GOOGLx/USD", "AAPLx/USD", "MSTRx/USD",
-    "SPYx/USD", "TQQQx/USD", "PLTRx/USD", "COINx/USD", "NFLXx/USD"
+    # Tech Giants
+    "AAPLx/USD", "AMZNx/USD", "GOOGLx/USD", "METAx/USD", "MSFTx/USD",
+    "NVDAx/USD", "TSLAx/USD", "AVGOx/USD", "INTCx/USD",
+    # Software/Cloud
+    "CRMx/USD", "ORCLx/USD", "PLTRx/USD",
+    # Streaming
+    "NFLXx/USD",
+    # Fintech/Crypto
+    "COINx/USD", "MSTRx/USD", "HOODx/USD",
+    # Healthcare/Pharma
+    "PFEx/USD", "JNJx/USD",
+    # Banking/Finance
+    "JPMx/USD", "BACx/USD", "GSx/USD",
+    # ETFs
+    "SPYx/USD", "QQQx/USD", "TQQQx/USD", "VTIx/USD", "GLDx/USD",
+    # Meme
+    "GMEx/USD"
 ]
 
 # Trading mode: "paper" or "live"
