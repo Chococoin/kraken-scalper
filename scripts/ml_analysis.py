@@ -870,14 +870,20 @@ def train_classification_models(
     # Remove rows with NaN
     mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
     X = X[mask]
-    y = y[mask].astype(int)
+    y_original = y[mask].astype(int)
+
+    # Remap labels from (-1, 0, 1) to (0, 1, 2) for XGBoost compatibility
+    # -1 (stop loss) -> 0, 0 (expired) -> 1, 1 (take profit) -> 2
+    label_map = {-1: 0, 0: 1, 1: 2}
+    reverse_label_map = {0: -1, 1: 0, 2: 1}
+    y = np.array([label_map.get(label, label) for label in y_original])
 
     if len(X) < 100:
         print(f"Warning: Only {len(X)} samples available for training")
         return []
 
-    # Class distribution
-    unique, counts = np.unique(y, return_counts=True)
+    # Class distribution (show original labels)
+    unique, counts = np.unique(y_original, return_counts=True)
     class_dist = dict(zip(unique.astype(int), counts.astype(int)))
 
     print(f"\nTraining CLASSIFICATION with {len(X)} samples, {len(feature_cols)} features")
@@ -981,11 +987,13 @@ def train_classification_models(
         best = max(results, key=lambda r: np.mean(r.f1_scores))
         print(f"\nBest Classifier: {best.name}")
 
-        # Final predictions on last fold
-        y_pred_final = best.model.predict(X)
+        # Final predictions on last fold (remap back to original labels)
+        y_pred_remapped = best.model.predict(X)
+        y_pred_final = np.array([reverse_label_map.get(p, p) for p in y_pred_remapped])
         print("\nClassification Report (Full Dataset):")
         print(classification_report(
-            y, y_pred_final,
+            y_original, y_pred_final,
+            labels=[-1, 0, 1],
             target_names=['Stop Loss (-1)', 'Expired (0)', 'Take Profit (1)'],
             zero_division=0
         ))
