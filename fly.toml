@@ -1,0 +1,21 @@
+# fly.toml app configuration file for scalper recorder daemon
+# See https://fly.io/docs/reference/configuration/
+
+app = 'scalper-dawn-frost-6201'
+primary_region = 'fra'
+
+[build]
+
+# No HTTP service - this is a worker/daemon process
+[processes]
+  app = "/app/recorder"
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+# Mount persistent storage for parquet files
+[mounts]
+  source = "data"
+  destination = "/app/data"
