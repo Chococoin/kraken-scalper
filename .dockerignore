@@ -1,0 +1,41 @@
+# Build artifacts
+target/
+
+# Data files (use volume instead)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+scalper.log
+
+# Git
+.git/
+.gitignore
+
+# Reports and models (ML outputs)
+reports/
+models/
+
+# Documentation
+*.md
+!README.md
+
+# Test files
+tests/
