@@ -81,6 +81,10 @@ path = "src/bin/backtest.rs"
 name = "hf_sync"
 path = "src/bin/hf_sync.rs"
 
+[[bin]]
+name = "chart"
+path = "src/bin/chart.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
