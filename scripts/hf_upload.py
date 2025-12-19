@@ -70,10 +70,28 @@ def main():
             commit_message=f"Upload {len(parquet_files)} data files ({total_size / 1_000_000:.2f} MB)",
         )
 
+        # Delete uploaded files to free disk space
+        deleted_count = 0
+        for f in parquet_files:
+            try:
+                f.unlink()
+                deleted_count += 1
+            except Exception:
+                pass  # Ignore deletion errors
+
+        # Remove empty directories
+        for subdir in sorted(data_dir.rglob("*"), reverse=True):
+            if subdir.is_dir():
+                try:
+                    subdir.rmdir()  # Only removes if empty
+                except Exception:
+                    pass
+
         result = {
             "success": True,
             "files_uploaded": len(parquet_files),
             "bytes_uploaded": total_size,
+            "files_deleted": deleted_count,
         }
 
         if args.json:
@@ -85,6 +103,7 @@ def main():
             print("=" * 60)
             print(f"\nDataset URL: https://huggingface.co/datasets/{args.repo_id}")
             print(f"Files uploaded: {len(parquet_files)}")
+            print(f"Files deleted: {deleted_count}")
 
     except Exception as e:
         result = {"success": False, "error": str(e)}
