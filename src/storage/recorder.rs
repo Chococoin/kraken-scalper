@@ -344,7 +344,8 @@ impl DataRecorder {
         now: DateTime<Utc>,
     ) -> Result<PathBuf> {
         let date_str = format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day());
-        let hour_str = format!("{:02}", now.hour());
+        // Include hour and minute to avoid overwriting on each flush
+        let time_str = format!("{:02}{:02}", now.hour(), now.minute());
 
         let dir = PathBuf::from(&self.config.data_dir)
             .join(category)
@@ -353,7 +354,7 @@ impl DataRecorder {
 
         fs::create_dir_all(&dir).context("Failed to create data directory")?;
 
-        Ok(dir.join(format!("{}.parquet", hour_str)))
+        Ok(dir.join(format!("{}.parquet", time_str)))
     }
 
     /// Write ticker data to parquet
@@ -589,8 +590,7 @@ impl DataRecorder {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        // For simplicity, we overwrite the file each hour
-        // A more sophisticated approach would append to existing files
+        // Each flush creates a new file with hour+minute timestamp (e.g., 0633.parquet)
         let file = File::create(path).context("Failed to create parquet file")?;
 
         let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
