@@ -4,17 +4,150 @@
 //! Run with: cargo run --bin recorder
 //!
 //! Stops gracefully on SIGINT (Ctrl+C) or SIGTERM.
+//!
+//! HTTP stats endpoint available at http://localhost:8080/
 
 use anyhow::Result;
-use chrono::{Datelike, Timelike, Utc, Weekday};
+use axum::{extract::State, response::Html, routing::get, Json, Router};
+use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
 use scalper::api::{KrakenWebSocket, MarketEvent};
 use scalper::config::Config;
 use scalper::storage::{DataRecorder, HfUploader};
+use serde::Serialize;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
+
+/// Shared stats for HTTP endpoint
+#[derive(Debug, Clone, Serialize)]
+struct RecorderStats {
+    uptime_secs: u64,
+    started_at: String,
+    connected: bool,
+    crypto_pairs: usize,
+    stock_pairs: usize,
+    trades_recorded: u64,
+    tickers_recorded: u64,
+    orderbooks_recorded: u64,
+    ohlc_recorded: u64,
+    last_sample: String,
+    us_market_open: bool,
+}
+
+/// Atomic counters for stats
+struct StatsCounters {
+    trades: AtomicU64,
+    tickers: AtomicU64,
+    orderbooks: AtomicU64,
+    ohlc: AtomicU64,
+    connected: AtomicBool,
+    last_sample: RwLock<DateTime<Utc>>,
+}
+
+impl StatsCounters {
+    fn new() -> Self {
+        Self {
+            trades: AtomicU64::new(0),
+            tickers: AtomicU64::new(0),
+            orderbooks: AtomicU64::new(0),
+            ohlc: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
+            last_sample: RwLock::new(Utc::now()),
+        }
+    }
+}
+
+/// HTTP state
+struct AppState {
+    start_time: Instant,
+    started_at: DateTime<Utc>,
+    crypto_pairs: usize,
+    stock_pairs: usize,
+    counters: Arc<StatsCounters>,
+}
+
+async fn stats_json(State(state): State<Arc<AppState>>) -> Json<RecorderStats> {
+    let last_sample = state.counters.last_sample.read().await;
+    Json(RecorderStats {
+        uptime_secs: state.start_time.elapsed().as_secs(),
+        started_at: state.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        connected: state.counters.connected.load(Ordering::Relaxed),
+        crypto_pairs: state.crypto_pairs,
+        stock_pairs: state.stock_pairs,
+        trades_recorded: state.counters.trades.load(Ordering::Relaxed),
+        tickers_recorded: state.counters.tickers.load(Ordering::Relaxed),
+        orderbooks_recorded: state.counters.orderbooks.load(Ordering::Relaxed),
+        ohlc_recorded: state.counters.ohlc.load(Ordering::Relaxed),
+        last_sample: last_sample.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        us_market_open: is_us_market_open(),
+    })
+}
+
+async fn stats_html(State(state): State<Arc<AppState>>) -> Html<String> {
+    let last_sample = state.counters.last_sample.read().await;
+    let uptime = state.start_time.elapsed().as_secs();
+    let hours = uptime / 3600;
+    let mins = (uptime % 3600) / 60;
+    let connected = state.counters.connected.load(Ordering::Relaxed);
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Scalper Recorder Stats</title>
+    <meta http-equiv="refresh" content="10">
+    <style>
+        body {{ font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }}
+        h1 {{ color: #00ff88; }}
+        .stat {{ margin: 10px 0; }}
+        .label {{ color: #888; }}
+        .value {{ color: #00ff88; font-weight: bold; }}
+        .connected {{ color: #00ff88; }}
+        .disconnected {{ color: #ff4444; }}
+        .market-open {{ color: #00ff88; }}
+        .market-closed {{ color: #ff8800; }}
+    </style>
+</head>
+<body>
+    <h1>📊 Scalper Recorder</h1>
+    <div class="stat"><span class="label">Status:</span> <span class="{}">{}</span></div>
+    <div class="stat"><span class="label">Uptime:</span> <span class="value">{}h {}m</span></div>
+    <div class="stat"><span class="label">Started:</span> <span class="value">{}</span></div>
+    <hr>
+    <h2>📈 Data Collected</h2>
+    <div class="stat"><span class="label">Trades:</span> <span class="value">{}</span></div>
+    <div class="stat"><span class="label">Tickers:</span> <span class="value">{}</span></div>
+    <div class="stat"><span class="label">Orderbooks:</span> <span class="value">{}</span></div>
+    <div class="stat"><span class="label">OHLC:</span> <span class="value">{}</span></div>
+    <div class="stat"><span class="label">Last Sample:</span> <span class="value">{}</span></div>
+    <hr>
+    <h2>⚙️ Configuration</h2>
+    <div class="stat"><span class="label">Crypto Pairs:</span> <span class="value">{}</span></div>
+    <div class="stat"><span class="label">Stock Pairs:</span> <span class="value">{}</span></div>
+    <div class="stat"><span class="label">US Market:</span> <span class="{}">{}</span></div>
+    <hr>
+    <p style="color:#666">Auto-refresh every 10s | <a href="/stats" style="color:#00ff88">JSON API</a></p>
+</body>
+</html>"#,
+        if connected { "connected" } else { "disconnected" },
+        if connected { "🟢 Connected" } else { "🔴 Disconnected" },
+        hours, mins,
+        state.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        state.counters.trades.load(Ordering::Relaxed),
+        state.counters.tickers.load(Ordering::Relaxed),
+        state.counters.orderbooks.load(Ordering::Relaxed),
+        state.counters.ohlc.load(Ordering::Relaxed),
+        last_sample.format("%H:%M:%S UTC"),
+        state.crypto_pairs,
+        state.stock_pairs,
+        if is_us_market_open() { "market-open" } else { "market-closed" },
+        if is_us_market_open() { "🟢 Open" } else { "🔴 Closed" },
+    );
+    Html(html)
+}
 
 /// Check if US stock market (NYSE) is currently open
 /// NYSE hours: 9:30 AM - 4:00 PM Eastern Time, Monday-Friday
@@ -82,6 +215,34 @@ async fn main() -> Result<()> {
         warn!("Recording is disabled in config. Enable it to capture data.");
         return Ok(());
     }
+
+    // Create stats counters
+    let counters = Arc::new(StatsCounters::new());
+
+    // Create HTTP server state
+    let app_state = Arc::new(AppState {
+        start_time: Instant::now(),
+        started_at: Utc::now(),
+        crypto_pairs: config.trading.crypto_pairs.len(),
+        stock_pairs: config.trading.stock_pairs.len(),
+        counters: Arc::clone(&counters),
+    });
+
+    // Start HTTP server
+    let http_state = Arc::clone(&app_state);
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route("/", get(stats_html))
+            .route("/stats", get(stats_json))
+            .with_state(http_state);
+
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+        let addr = format!("0.0.0.0:{}", port);
+        info!("Starting HTTP stats server on {}", addr);
+
+        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        axum::serve(listener, app).await.unwrap();
+    });
 
     // Create recorder
     let mut recorder = DataRecorder::new(&config);
@@ -169,9 +330,11 @@ async fn main() -> Result<()> {
                     match event {
                         MarketEvent::Connected => {
                             info!("Connected to Kraken WebSocket");
+                            counters.connected.store(true, Ordering::Relaxed);
                         }
                         MarketEvent::Disconnected => {
                             warn!("Disconnected from Kraken WebSocket");
+                            counters.connected.store(false, Ordering::Relaxed);
                         }
                         MarketEvent::TradeUpdate(trade) => {
                             recorder.record_trade(
@@ -181,6 +344,7 @@ async fn main() -> Result<()> {
                                 trade.qty,
                                 trade.trade_id,
                             );
+                            counters.trades.fetch_add(1, Ordering::Relaxed);
                         }
                         MarketEvent::TickerUpdate(_) |
                         MarketEvent::OrderBookUpdate(_) |
@@ -206,6 +370,9 @@ async fn main() -> Result<()> {
         // Sample crypto data
         if recorder.should_sample_crypto() {
             let mut sampled = 0;
+            let mut ticker_count = 0u64;
+            let mut orderbook_count = 0u64;
+            let mut ohlc_count = 0u64;
             if let Ok(tickers) = ws_tickers.try_lock() {
                 if let Ok(orderbooks) = ws_orderbooks.try_lock() {
                     if let Ok(candles) = ws_candles.try_lock() {
@@ -213,13 +380,16 @@ async fn main() -> Result<()> {
                             if let Some(ticker) = tickers.get(pair) {
                                 recorder.record_ticker(ticker);
                                 sampled += 1;
+                                ticker_count += 1;
                             }
                             if let Some(orderbook) = orderbooks.get(pair) {
                                 recorder.record_orderbook(pair, orderbook);
+                                orderbook_count += 1;
                             }
                             if let Some(pair_candles) = candles.get(pair) {
                                 if let Some(candle) = pair_candles.back() {
                                     recorder.record_ohlc(pair, candle);
+                                    ohlc_count += 1;
                                 }
                             }
                         }
@@ -228,6 +398,10 @@ async fn main() -> Result<()> {
             }
             recorder.mark_crypto_sampled();
             if sampled > 0 {
+                counters.tickers.fetch_add(ticker_count, Ordering::Relaxed);
+                counters.orderbooks.fetch_add(orderbook_count, Ordering::Relaxed);
+                counters.ohlc.fetch_add(ohlc_count, Ordering::Relaxed);
+                *counters.last_sample.write().await = Utc::now();
                 info!("Sampled crypto data: {} pairs", sampled);
             }
         }
@@ -239,7 +413,10 @@ async fn main() -> Result<()> {
             // Only record stock data when US market is open (NYSE: 9:30 AM - 4:00 PM ET, Mon-Fri)
             if is_us_market_open() {
                 let mut sampled = 0;
-                let ticker_count = ws_tickers.try_lock().map(|t| t.all().count()).unwrap_or(0);
+                let mut stock_ticker_count = 0u64;
+                let mut stock_orderbook_count = 0u64;
+                let mut stock_ohlc_count = 0u64;
+                let ticker_map_count = ws_tickers.try_lock().map(|t| t.all().count()).unwrap_or(0);
                 if let Ok(tickers) = ws_tickers.try_lock() {
                     if let Ok(orderbooks) = ws_orderbooks.try_lock() {
                         if let Ok(candles) = ws_candles.try_lock() {
@@ -247,13 +424,16 @@ async fn main() -> Result<()> {
                                 if let Some(ticker) = tickers.get(pair) {
                                     recorder.record_ticker(ticker);
                                     sampled += 1;
+                                    stock_ticker_count += 1;
                                 }
                                 if let Some(orderbook) = orderbooks.get(pair) {
                                     recorder.record_orderbook(pair, orderbook);
+                                    stock_orderbook_count += 1;
                                 }
                                 if let Some(pair_candles) = candles.get(pair) {
                                     if let Some(candle) = pair_candles.back() {
                                         recorder.record_ohlc(pair, candle);
+                                        stock_ohlc_count += 1;
                                     }
                                 }
                             }
@@ -261,6 +441,10 @@ async fn main() -> Result<()> {
                     }
                 }
                 if sampled > 0 {
+                    counters.tickers.fetch_add(stock_ticker_count, Ordering::Relaxed);
+                    counters.orderbooks.fetch_add(stock_orderbook_count, Ordering::Relaxed);
+                    counters.ohlc.fetch_add(stock_ohlc_count, Ordering::Relaxed);
+                    *counters.last_sample.write().await = Utc::now();
                     info!("Sampled stock data: {} pairs (market open)", sampled);
 
                     // Flush immediately after stock sampling to ensure stock data is saved
@@ -273,10 +457,10 @@ async fn main() -> Result<()> {
                     if let Err(e) = recorder.flush() {
                         error!("Failed to flush: {}", e);
                     }
-                } else if ticker_count > 0 {
+                } else if ticker_map_count > 0 {
                     // Only warn if we have some data but no stocks matched
                     warn!("Stock sample: 0/{} stock pairs (ticker map has {} entries, data may still be loading)",
-                        config.trading.stock_pairs.len(), ticker_count);
+                        config.trading.stock_pairs.len(), ticker_map_count);
                 }
             }
         }

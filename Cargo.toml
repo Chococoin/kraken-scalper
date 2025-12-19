@@ -63,6 +63,7 @@ arrow = "54"
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
+axum = { version = "0.8.7", features = ["json"] }
 
 [[bin]]
 name = "scalper"
