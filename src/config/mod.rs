@@ -15,6 +15,8 @@ pub struct Config {
     pub backtest: BacktestConfigFile,
     #[serde(default)]
     pub huggingface: HuggingFaceConfig,
+    #[serde(default)]
+    pub kraken_ohlc: KrakenOhlcConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,6 +133,35 @@ impl Default for HuggingFaceConfig {
             repo_id: String::new(),
             upload_interval_secs: 3600,
             upload_delay_hours: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KrakenOhlcSchedule {
+    pub interval: u32,           // Interval in minutes (1, 5, 15, 60, 1440)
+    pub fetch_every_hours: u32,  // How often to fetch this interval
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KrakenOhlcConfig {
+    pub enabled: bool,
+    pub pairs: Vec<String>,           // Pairs to capture
+    pub request_delay_ms: u64,        // Delay between requests (min 1000ms)
+    pub overlap_minutes: u32,         // Overlap to ensure no gaps (default 60 = 1 hour)
+    pub schedules: Vec<KrakenOhlcSchedule>,
+}
+
+impl Default for KrakenOhlcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pairs: vec!["BTC/USD".into(), "ETH/USD".into()],
+            request_delay_ms: 1100,
+            overlap_minutes: 5, // 5 minutes overlap to ensure no gaps
+            schedules: vec![
+                KrakenOhlcSchedule { interval: 1, fetch_every_hours: 12 },
+            ],
         }
     }
 }

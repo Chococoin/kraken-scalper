@@ -99,3 +99,18 @@ enabled = true                                # Enable automatic upload
 repo_id = "Abraxasccs/kraken-market-data"     # Dataset repository ID
 upload_interval_secs = 3600               # Check for uploads every hour
 upload_delay_hours = 1                    # Wait 1 hour before uploading (ensure file complete)
+
+[kraken_ohlc]
+# Kraken REST API OHLC data capture (incremental historical data)
+enabled = true
+# Same crypto pairs as WebSocket
+pairs = ["BTC/USD", "BTC/EUR", "ETH/USD", "ETH/EUR", "SOL/USD", "SOL/EUR", "DOT/USD", "DOT/EUR", "POL/USD", "POL/EUR"]
+# Delay between API requests in ms (min 1000ms to avoid rate limits)
+request_delay_ms = 1100
+# Overlap in minutes to ensure no gaps when merging data (fetches slightly earlier)
+overlap_minutes = 5
+
+# Only 1-minute interval, fetch every 12 hours
+[[kraken_ohlc.schedules]]
+interval = 1
+fetch_every_hours = 12

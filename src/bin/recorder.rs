@@ -12,7 +12,7 @@ use axum::{extract::State, response::Html, routing::get, Json, Router};
 use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
 use scalper::api::{KrakenWebSocket, MarketEvent};
 use scalper::config::Config;
-use scalper::storage::{DataRecorder, HfUploader};
+use scalper::storage::{DataRecorder, HfUploader, KrakenOhlcFetcher};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -279,6 +279,22 @@ async fn main() -> Result<()> {
     let mut last_hf_sync = Instant::now();
     let hf_upload_interval = Duration::from_secs(config.huggingface.upload_interval_secs);
 
+    // Create Kraken OHLC fetcher if enabled
+    let mut ohlc_fetcher = if config.kraken_ohlc.enabled {
+        info!(
+            "Kraken OHLC REST capture enabled for {} pairs",
+            config.kraken_ohlc.pairs.len()
+        );
+        Some(KrakenOhlcFetcher::new(
+            config.kraken_ohlc.clone(),
+            &config.recording.data_dir,
+        ))
+    } else {
+        None
+    };
+    let mut last_ohlc_check = Instant::now();
+    let ohlc_check_interval = Duration::from_secs(60); // Check every minute
+
     // Create event channel
     let (event_tx, mut event_rx) = mpsc::channel::<MarketEvent>(1000);
 
@@ -499,6 +515,26 @@ async fn main() -> Result<()> {
                     Err(e) => error!("HuggingFace sync failed: {}", e),
                 }
                 last_hf_sync = Instant::now();
+            }
+        }
+
+        // Periodic Kraken REST API OHLC fetch
+        if let Some(ref mut fetcher) = ohlc_fetcher {
+            if last_ohlc_check.elapsed() >= ohlc_check_interval {
+                if fetcher.should_fetch() {
+                    info!("Starting Kraken OHLC REST fetch...");
+                    match fetcher.fetch_all_pending().await {
+                        Ok(count) => {
+                            if count > 0 {
+                                info!("Fetched {} total OHLC candles from Kraken REST API", count);
+                            }
+                            let (pairs, fetched) = fetcher.stats();
+                            info!("OHLC REST stats: {} pairs configured, {} fetch records", pairs, fetched);
+                        }
+                        Err(e) => error!("Kraken OHLC REST fetch failed: {}", e),
+                    }
+                }
+                last_ohlc_check = Instant::now();
             }
         }
     }
