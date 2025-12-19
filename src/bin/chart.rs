@@ -65,6 +65,13 @@ struct KrakenOhlcQuery {
     interval: Option<u32>,
 }
 
+/// Query parameters for local Kraken OHLC endpoint
+#[derive(Debug, Deserialize)]
+struct LocalOhlcQuery {
+    pair: String,
+    interval: Option<u32>,
+}
+
 /// HTTP client for Kraken API
 struct KrakenClient {
     client: reqwest::Client,
@@ -427,6 +434,122 @@ async fn get_kraken_pairs(State(state): State<Arc<AppState>>) -> Json<Vec<String
     }
 }
 
+/// List available pairs from local Kraken data
+async fn list_local_pairs(State(state): State<Arc<AppState>>) -> Json<Vec<String>> {
+    let kraken_dir = state.data_dir.join("kraken");
+    let mut pairs = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&kraken_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                // Convert directory name back to pair format (BTC_USD -> BTC/USD)
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                let pair = dir_name.replace("_", "/");
+                pairs.push(pair);
+            }
+        }
+    }
+
+    pairs.sort();
+    Json(pairs)
+}
+
+/// List available intervals for a pair from local Kraken data
+async fn list_local_intervals(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LocalOhlcQuery>,
+) -> Json<Vec<u32>> {
+    let pair_safe = query.pair.replace("/", "_");
+    let pair_dir = state.data_dir.join("kraken").join(&pair_safe);
+    let mut intervals = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&pair_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                if let Some(stem) = path.file_stem() {
+                    if let Ok(interval) = stem.to_string_lossy().parse::<u32>() {
+                        intervals.push(interval);
+                    }
+                }
+            }
+        }
+    }
+
+    intervals.sort();
+    Json(intervals)
+}
+
+/// Get OHLC data from local Kraken parquet files
+async fn get_local_ohlc(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LocalOhlcQuery>,
+) -> Json<Vec<OhlcCandle>> {
+    let interval = query.interval.unwrap_or(1);
+    let pair_safe = query.pair.replace("/", "_");
+    let file_path = state.data_dir
+        .join("kraken")
+        .join(&pair_safe)
+        .join(format!("{}.parquet", interval));
+
+    if !file_path.exists() {
+        warn!("Local OHLC file not found: {}", file_path.display());
+        return Json(vec![]);
+    }
+
+    let mut candles = Vec::new();
+
+    match File::open(&file_path) {
+        Ok(file) => {
+            match ParquetRecordBatchReaderBuilder::try_new(file) {
+                Ok(builder) => {
+                    match builder.build() {
+                        Ok(reader) => {
+                            for batch in reader.flatten() {
+                                let ts_col = batch.column_by_name("ts")
+                                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+                                let open_col = batch.column_by_name("open")
+                                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
+                                let high_col = batch.column_by_name("high")
+                                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
+                                let low_col = batch.column_by_name("low")
+                                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
+                                let close_col = batch.column_by_name("close")
+                                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
+                                let volume_col = batch.column_by_name("volume")
+                                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
+
+                                if let (Some(ts), Some(open), Some(high), Some(low), Some(close), Some(vol)) =
+                                    (ts_col, open_col, high_col, low_col, close_col, volume_col) {
+                                    for i in 0..batch.num_rows() {
+                                        candles.push(OhlcCandle {
+                                            time: ts.value(i) / 1000, // Convert ms to seconds
+                                            open: open.value(i),
+                                            high: high.value(i),
+                                            low: low.value(i),
+                                            close: close.value(i),
+                                            volume: vol.value(i),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => warn!("Failed to build parquet reader: {}", e),
+                    }
+                }
+                Err(e) => warn!("Failed to create parquet builder: {}", e),
+            }
+        }
+        Err(e) => warn!("Failed to open file {}: {}", file_path.display(), e),
+    }
+
+    // Sort by time
+    candles.sort_by_key(|c| c.time);
+
+    info!("Loaded {} candles from local file: {}", candles.len(), file_path.display());
+    Json(candles)
+}
+
 /// Main HTML page with chart
 async fn index_page() -> Html<String> {
 
@@ -568,8 +691,9 @@ async fn index_page() -> Html<String> {
         <h1>Scalper Charts</h1>
         <div class="controls">
             <select id="data-source">
-                <option value="captured">Captured</option>
-                <option value="kraken">Kraken API</option>
+                <option value="local" selected>Local (720 candles)</option>
+                <option value="captured">WebSocket Captured</option>
+                <option value="kraken">Kraken API (live)</option>
             </select>
             <select id="category">
                 <option value="crypto">Crypto</option>
@@ -755,13 +879,20 @@ async fn index_page() -> Html<String> {
                 let data;
                 let rawCount = 0;
 
-                if (dataSource === 'kraken') {{
+                if (dataSource === 'local') {{
+                    // Fetch from local Kraken parquet files (720 candles)
+                    const response = await fetch(`/api/local-ohlc?pair=${{encodeURIComponent(pair)}}&interval=1`);
+                    const rawData = await response.json();
+                    rawCount = rawData.length;
+                    // Resample if needed (local is 1m interval)
+                    data = targetMinutes === 1 ? rawData : resampleOHLC(rawData, targetMinutes);
+                }} else if (dataSource === 'kraken') {{
                     // Fetch directly from Kraken API with interval
                     const response = await fetch(`/api/kraken-ohlc?pair=${{encodeURIComponent(pair)}}&interval=${{targetMinutes}}`);
                     data = await response.json();
                     rawCount = data.length;
                 }} else {{
-                    // Fetch from captured data and resample
+                    // Fetch from captured WebSocket data and resample
                     const response = await fetch(`/api/ohlc?pair=${{encodeURIComponent(pair)}}&category=${{category}}`);
                     const rawData = await response.json();
                     rawCount = rawData.length;
@@ -775,10 +906,17 @@ async fn index_page() -> Html<String> {
                 }}
 
                 // Display candle count
-                const sourceLabel = dataSource === 'kraken' ? 'Kraken' : 'Captured';
-                document.getElementById('candle-count').textContent = dataSource === 'kraken'
-                    ? `${{data.length}} candles (${{sourceLabel}})`
-                    : `${{data.length}} candles (from ${{rawCount}} raw)`;
+                let countText = '';
+                if (dataSource === 'local') {{
+                    countText = targetMinutes === 1
+                        ? `${{data.length}} candles (Local 1m)`
+                        : `${{data.length}} candles (resampled from ${{rawCount}} × 1m)`;
+                }} else if (dataSource === 'kraken') {{
+                    countText = `${{data.length}} candles (Kraken API)`;
+                }} else {{
+                    countText = `${{data.length}} candles (from ${{rawCount}} WebSocket)`;
+                }}
+                document.getElementById('candle-count').textContent = countText;
 
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('stats').style.display = 'block';
@@ -1041,18 +1179,21 @@ async fn index_page() -> Html<String> {
         }});
 
         // Load pairs for selected category
-        async function loadPairs() {{
+        async function loadPairs(preservePair = false) {{
             const dataSource = document.getElementById('data-source').value;
             const category = document.getElementById('category').value;
             const pairSelect = document.getElementById('pair');
             const categorySelect = document.getElementById('category');
+            const currentPair = pairSelect.value;
 
             // Show/hide category based on data source
             categorySelect.style.display = dataSource === 'captured' ? 'block' : 'none';
 
             try {{
                 let url;
-                if (dataSource === 'kraken') {{
+                if (dataSource === 'local') {{
+                    url = '/api/local-pairs';
+                }} else if (dataSource === 'kraken') {{
                     url = '/api/kraken-pairs';
                 }} else {{
                     url = `/api/pairs?category=${{category}}`;
@@ -1065,9 +1206,16 @@ async fn index_page() -> Html<String> {
                     `<option value="${{p}}">${{p}}</option>`
                 ).join('');
 
-                // Load chart with first pair
+                // Try to preserve the current pair selection if it exists in new list
+                if (preservePair && currentPair && pairs.includes(currentPair)) {{
+                    pairSelect.value = currentPair;
+                }}
+
+                // Load chart with selected pair
                 if (pairs.length > 0) {{
                     loadChart();
+                }} else {{
+                    document.getElementById('loading').textContent = 'No data found for this source.';
                 }}
             }} catch (error) {{
                 console.error('Error loading pairs:', error);
@@ -1117,8 +1265,8 @@ async fn index_page() -> Html<String> {
             return result;
         }}
 
-        // Update data source handler
-        document.getElementById('data-source').addEventListener('change', loadPairs);
+        // Update data source handler - preserve pair selection when switching sources
+        document.getElementById('data-source').addEventListener('change', () => loadPairs(true));
 
         // Update category handler
         document.getElementById('category').addEventListener('change', loadPairs);
@@ -1164,6 +1312,9 @@ async fn main() -> Result<()> {
         .route("/api/ohlc", get(get_ohlc))
         .route("/api/kraken-pairs", get(get_kraken_pairs))
         .route("/api/kraken-ohlc", get(get_kraken_ohlc))
+        .route("/api/local-pairs", get(list_local_pairs))
+        .route("/api/local-intervals", get(list_local_intervals))
+        .route("/api/local-ohlc", get(get_local_ohlc))
         .with_state(state);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
