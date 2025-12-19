@@ -2216,8 +2216,10 @@ def main():
     parser.add_argument('--pair', type=str, default='BTC/USD', help='Trading pair')
     parser.add_argument('--category', type=str, default='crypto', choices=['crypto', 'stocks'])
     parser.add_argument('--source', type=str, default='websocket', choices=['websocket', 'kraken'],
-                        help='Data source: websocket (captured) or kraken (REST API 1m candles)')
-    parser.add_argument('--target', type=str, default='5m', help='Target horizon (5m, 15m, 30m, 1h)')
+                        help='Data source: websocket (captured) or kraken (REST API candles)')
+    parser.add_argument('--ohlc-interval', type=int, default=1,
+                        help='OHLC candle interval in minutes for Kraken source (1, 5, 15, 60, 1440)')
+    parser.add_argument('--target', type=str, default='5m', help='Target horizon (5m, 15m, 30m, 1h, 4h, 1d)')
     parser.add_argument('--plot', action='store_true', help='Show plots')
     parser.add_argument('--save-model', type=str, help='Save best model to path')
     parser.add_argument('--output-dir', type=str, default='reports', help='Output directory for plots')
@@ -2253,21 +2255,33 @@ def main():
     output_dir.mkdir(exist_ok=True)
 
     # Parse target horizon
-    target_map = {'5m': 5, '15m': 15, '30m': 30, '1h': 60}
+    target_map = {'5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
     if args.target not in target_map:
         print(f"Invalid target: {args.target}. Use one of: {list(target_map.keys())}")
         return
     target_horizon = target_map[args.target]
 
+    # For OHLC data, target horizon is in candles, not minutes
+    # Adjust based on ohlc-interval
+    candles_per_target = target_horizon  # default for 1-minute data
+    if args.source == 'kraken' and args.ohlc_interval > 1:
+        # Convert target from minutes to number of candles
+        candles_per_target = target_horizon // args.ohlc_interval
+        if candles_per_target < 1:
+            candles_per_target = 1
+        print(f"Note: With {args.ohlc_interval}m candles, {args.target} = {candles_per_target} candles forward")
+
     # Determine target column and mode
+    # For non-1-minute data, use candle-based horizon
+    horizon_suffix = candles_per_target if (args.source == 'kraken' and args.ohlc_interval > 1) else target_horizon
     if args.retracement:
         target_col = 'retracement_label'
         strategy_mode = 'retracement'
     elif args.triple_barrier:
-        target_col = f'tb_label_{target_horizon}m'
+        target_col = f'tb_label_{horizon_suffix}m'
         strategy_mode = 'triple_barrier'
     else:
-        target_col = f'target_{target_horizon}m'
+        target_col = f'target_{horizon_suffix}m'
         strategy_mode = 'regression'
 
     print(f"\n{'='*60}")
@@ -2293,8 +2307,8 @@ def main():
     print("Loading data...")
 
     if args.source == 'kraken':
-        # Load from Kraken REST API parquet files (720+ 1-minute candles)
-        kraken_df = load_kraken_ohlc_data(data_dir, args.pair)
+        # Load from Kraken REST API parquet files
+        kraken_df = load_kraken_ohlc_data(data_dir, args.pair, interval=args.ohlc_interval)
 
         if kraken_df.empty:
             print(f"No Kraken REST data found for {args.pair}")
@@ -2373,9 +2387,29 @@ def main():
     else:
         # Standard targets (regression or triple barrier)
         use_atr = args.tb_take_profit is None or args.tb_stop_loss is None
+
+        # Adjust horizons based on OHLC interval
+        # For 1-minute candles: [5, 15, 30, 60] = 5m, 15m, 30m, 1h
+        # For 60-minute candles: [1, 2, 4, 6] = 1h, 2h, 4h, 6h
+        # For 1440-minute (daily) candles: [1, 2, 5, 7] = 1d, 2d, 5d, 1w
+        if args.source == 'kraken' and args.ohlc_interval > 1:
+            if args.ohlc_interval == 60:  # 1h candles
+                horizons = [1, 2, 4, 6]  # 1h, 2h, 4h, 6h
+                horizon_labels = ['1h', '2h', '4h', '6h']
+            elif args.ohlc_interval == 1440:  # daily candles
+                horizons = [1, 2, 5, 7]  # 1d, 2d, 5d, 1w
+                horizon_labels = ['1d', '2d', '5d', '1w']
+            else:
+                # Convert minutes to candles
+                horizons = [max(1, h // args.ohlc_interval) for h in [5, 15, 30, 60]]
+                horizon_labels = [f'{h}' for h in horizons]
+            print(f"Using horizons: {horizons} ({horizon_labels})")
+        else:
+            horizons = [5, 15, 30, 60]
+
         df = create_targets(
             df,
-            horizons=[5, 15, 30, 60],
+            horizons=horizons,
             use_triple_barrier=args.triple_barrier,
             tb_take_profit=args.tb_take_profit,
             tb_stop_loss=args.tb_stop_loss,
