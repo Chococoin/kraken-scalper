@@ -168,6 +168,62 @@ def load_ohlc_data(data_dir: Path, pair: str, category: str = "crypto") -> pd.Da
     return df
 
 
+def load_kraken_ohlc_data(data_dir: Path, pair: str, interval: int = 1) -> pd.DataFrame:
+    """
+    Load OHLC data from Kraken REST API parquet files.
+
+    These files are stored at: data/kraken/{pair_safe}/{interval}.parquet
+    Example: data/kraken/BTC_USD/1.parquet
+
+    Args:
+        data_dir: Base data directory
+        pair: Trading pair (e.g., 'BTC/USD')
+        interval: Candle interval in minutes (default: 1)
+
+    Returns:
+        DataFrame with OHLC data ready for ML analysis
+    """
+    pair_safe = pair.replace("/", "_")
+    file_path = data_dir / "kraken" / pair_safe / f"{interval}.parquet"
+
+    if not file_path.exists():
+        print(f"Warning: Kraken OHLC file not found: {file_path}")
+        # List available pairs
+        kraken_dir = data_dir / "kraken"
+        if kraken_dir.exists():
+            available = [d.name.replace("_", "/") for d in kraken_dir.iterdir() if d.is_dir()]
+            print(f"Available pairs: {sorted(available)}")
+        return pd.DataFrame()
+
+    df = pd.read_parquet(file_path)
+
+    if df.empty:
+        return df
+
+    # Convert timestamp from ms to datetime
+    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+    df = df.sort_values('datetime').reset_index(drop=True)
+    df = df.drop_duplicates(subset=['ts'], keep='last')
+
+    # Rename columns to match expected format
+    # Kraken REST has: ts, pair, open, high, low, close, volume, vwap, trades
+    # We need: datetime, open, high, low, close, volume, and optionally last (price)
+    df['last'] = df['close']  # Use close as current price
+
+    print(f"Loaded {len(df)} candles from {file_path}")
+    print(f"Time range: {df['datetime'].min()} to {df['datetime'].max()}")
+
+    return df
+
+
+def list_kraken_pairs(data_dir: Path) -> List[str]:
+    """List available pairs in Kraken REST data."""
+    kraken_dir = data_dir / "kraken"
+    if not kraken_dir.exists():
+        return []
+    return sorted([d.name.replace("_", "/") for d in kraken_dir.iterdir() if d.is_dir()])
+
+
 def load_book_data(data_dir: Path, pair: str, category: str = "crypto") -> pd.DataFrame:
     """Load and parse order book data for a specific pair."""
     df = load_parquet_files(data_dir, category, "book")
@@ -772,6 +828,51 @@ def add_book_features(ticker_df: pd.DataFrame, book_df: pd.DataFrame) -> pd.Data
 
     # Clean up
     df = df.drop(columns=['bids', 'asks'], errors='ignore')
+
+    return df
+
+
+def create_features_from_ohlc(ohlc_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create features directly from OHLC data (for Kraken REST API data).
+
+    This is optimized for the 1-minute candle data from Kraken REST API,
+    which includes: ts, pair, open, high, low, close, volume, vwap, trades
+    """
+    df = ohlc_df.copy()
+
+    # Ensure we have required columns
+    required = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    # Use close as 'last' price for compatibility
+    if 'last' not in df.columns:
+        df['last'] = df['close']
+
+    # Add technical indicators
+    df = add_technical_features(df)
+
+    # Add momentum features
+    df = add_momentum_features(df)
+
+    # Add volume features
+    df = add_volume_features(df)
+
+    # Add oscillator features
+    df = add_oscillator_features(df)
+
+    # Add VWAP-based features if available
+    if 'vwap' in df.columns:
+        df['vwap_deviation'] = (df['close'] - df['vwap']) / df['vwap']
+        df['vwap_above'] = (df['close'] > df['vwap']).astype(int)
+
+    # Add trade count features if available
+    if 'trades' in df.columns:
+        df['trades_sma_5'] = df['trades'].rolling(5).mean()
+        df['trades_sma_20'] = df['trades'].rolling(20).mean()
+        df['trades_ratio'] = df['trades'] / df['trades_sma_20']
 
     return df
 
@@ -2114,6 +2215,8 @@ def main():
     parser.add_argument('--data-dir', type=str, default='data', help='Data directory')
     parser.add_argument('--pair', type=str, default='BTC/USD', help='Trading pair')
     parser.add_argument('--category', type=str, default='crypto', choices=['crypto', 'stocks'])
+    parser.add_argument('--source', type=str, default='websocket', choices=['websocket', 'kraken'],
+                        help='Data source: websocket (captured) or kraken (REST API 1m candles)')
     parser.add_argument('--target', type=str, default='5m', help='Target horizon (5m, 15m, 30m, 1h)')
     parser.add_argument('--plot', action='store_true', help='Show plots')
     parser.add_argument('--save-model', type=str, help='Save best model to path')
@@ -2186,30 +2289,48 @@ def main():
 
     print(f"{'='*60}\n")
 
-    # Load data
+    # Load data based on source
     print("Loading data...")
-    ticker_df = load_ticker_data(data_dir, args.pair, args.category)
 
-    if ticker_df.empty:
-        print(f"No ticker data found for {args.pair}")
-        # List available pairs
-        all_ticker = load_parquet_files(data_dir, args.category, "ticker")
-        if not all_ticker.empty:
-            print(f"Available pairs: {sorted(all_ticker['pair'].unique())}")
-        return
+    if args.source == 'kraken':
+        # Load from Kraken REST API parquet files (720+ 1-minute candles)
+        kraken_df = load_kraken_ohlc_data(data_dir, args.pair)
 
-    print(f"Loaded {len(ticker_df)} ticker records")
+        if kraken_df.empty:
+            print(f"No Kraken REST data found for {args.pair}")
+            available = list_kraken_pairs(data_dir)
+            if available:
+                print(f"Available pairs: {available}")
+            return
 
-    # Load supplementary data
-    ohlc_df = load_ohlc_data(data_dir, args.pair, args.category)
-    print(f"Loaded {len(ohlc_df)} OHLC records")
+        # Create features directly from OHLC
+        print("\nCreating features from Kraken OHLC data...")
+        df = create_features_from_ohlc(kraken_df)
 
-    book_df = load_book_data(data_dir, args.pair, args.category)
-    print(f"Loaded {len(book_df)} order book records")
+    else:
+        # Load from WebSocket captured data (original method)
+        ticker_df = load_ticker_data(data_dir, args.pair, args.category)
 
-    # Create features
-    print("\nCreating features...")
-    df = create_features(ticker_df, ohlc_df, book_df)
+        if ticker_df.empty:
+            print(f"No ticker data found for {args.pair}")
+            # List available pairs
+            all_ticker = load_parquet_files(data_dir, args.category, "ticker")
+            if not all_ticker.empty:
+                print(f"Available pairs: {sorted(all_ticker['pair'].unique())}")
+            return
+
+        print(f"Loaded {len(ticker_df)} ticker records")
+
+        # Load supplementary data
+        ohlc_df = load_ohlc_data(data_dir, args.pair, args.category)
+        print(f"Loaded {len(ohlc_df)} OHLC records")
+
+        book_df = load_book_data(data_dir, args.pair, args.category)
+        print(f"Loaded {len(book_df)} order book records")
+
+        # Create features
+        print("\nCreating features...")
+        df = create_features(ticker_df, ohlc_df, book_df)
 
     # Create targets based on strategy mode
     print("Creating targets...")
