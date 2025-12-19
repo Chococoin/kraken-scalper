@@ -8,6 +8,11 @@ primary_region = 'fra'
 
 [build]
 
+# Persistent volume for market data
+[mounts]
+  source = "scalper_data"
+  destination = "/app/data"
+
 # HTTP service for stats endpoint
 [http_service]
   internal_port = 8080

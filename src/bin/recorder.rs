@@ -465,6 +465,21 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Periodic flush to disk
+        if recorder.should_flush() {
+            let stats = recorder.buffer_stats();
+            if stats.0 > 0 || stats.3 > 0 || stats.4 > 0 || stats.7 > 0 {
+                info!(
+                    "Periodic flush - crypto: {}t/{}b/{}o/{}tr, stocks: {}t/{}b/{}o/{}tr",
+                    stats.0, stats.1, stats.2, stats.3,
+                    stats.4, stats.5, stats.6, stats.7
+                );
+                if let Err(e) = recorder.flush() {
+                    error!("Failed to flush: {}", e);
+                }
+            }
+        }
+
         // Sync to HuggingFace periodically
         if let Some(ref mut uploader) = hf_uploader {
             if last_hf_sync.elapsed() >= hf_upload_interval {
